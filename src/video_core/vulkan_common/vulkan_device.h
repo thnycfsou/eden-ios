@@ -81,6 +81,13 @@ VK_DEFINE_HANDLE(VmaAllocator)
 
 
 // Define miscellaneous extensions which may be used by the implementation here.
+#ifdef VK_KHR_portability_subset
+#define FOR_EACH_VK_PORTABILITY_SUBSET(EXTENSION)                                                   \
+    EXTENSION(KHR, PORTABILITY_SUBSET, portability_subset)
+#else
+#define FOR_EACH_VK_PORTABILITY_SUBSET(EXTENSION)
+#endif
+
 #define FOR_EACH_VK_EXTENSION(EXTENSION)                                                           \
     EXTENSION(EXT, ASTC_DECODE_MODE, astc_decode_mode)                                             \
     EXTENSION(EXT, CONDITIONAL_RENDERING, conditional_rendering)                                   \
@@ -109,7 +116,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(KHR, MAINTENANCE_3, maintenance3)                                                    \
     EXTENSION(KHR, MAINTENANCE_7, maintenance7)                                                    \
     EXTENSION(KHR, MAINTENANCE_8, maintenance8)                                                    \
-    EXTENSION(KHR, PORTABILITY_SUBSET, portability_subset)                                         \
+    FOR_EACH_VK_PORTABILITY_SUBSET(EXTENSION)                                                       \
     EXTENSION(NV, DEVICE_DIAGNOSTICS_CONFIG, device_diagnostics_config)                            \
     EXTENSION(NV, GEOMETRY_SHADER_PASSTHROUGH, geometry_shader_passthrough)                        \
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
