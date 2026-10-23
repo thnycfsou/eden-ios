@@ -226,6 +226,45 @@ if [ -n "$EXPECTED_MOLTENVK_REPO" ]; then
             fail "MoltenVK does not export vkGetInstanceProcAddr"
         fi
 
+        # otool -L includes LC_ID_DYLIB as its first entry for a dylib. Ignore
+        # only that exact entry, confirmed independently by otool -D; all loaded
+        # dependencies must still be Apple system libraries.
+        install_id_list="$(otool -D "$MVK" 2>/dev/null)"
+        install_id_status=$?
+        dependency_list="$(otool -L "$MVK" 2>/dev/null)"
+        dependency_status=$?
+        install_id="$(printf '%s\n' "$install_id_list" | sed -n '2{s/^[[:space:]]*//;p;}')"
+        dependency_failure=0
+        install_id_seen=0
+        first_dependency=1
+        if [ "$install_id_status" -ne 0 ] || [ "$dependency_status" -ne 0 ] || [ -z "$dependency_list" ]; then
+            fail "could not inspect MoltenVK install ID or dynamic dependencies"
+            dependency_failure=1
+        else
+            while IFS= read -r dependency; do
+                [ -n "$dependency" ] || continue
+                if [ "$first_dependency" = 1 ]; then
+                    first_dependency=0
+                    if [ -n "$install_id" ] && [ "$dependency" = "$install_id" ]; then
+                        install_id_seen=1
+                        continue
+                    fi
+                fi
+                case "$dependency" in
+                    /System/Library/*|/usr/lib/*) ;;
+                    *)
+                        fail "MoltenVK has non-system dynamic dependency: $dependency"
+                        dependency_failure=1
+                        ;;
+                esac
+            done < <(printf '%s\n' "$dependency_list" | sed '1d; s/^[[:space:]]*//; s/ (compatibility version.*$//')
+            if [ -n "$install_id" ] && [ "$install_id_seen" != 1 ]; then
+                fail "MoltenVK LC_ID_DYLIB does not match the first otool -L entry"
+                dependency_failure=1
+            fi
+            [ "$dependency_failure" -ne 0 ] || pass "MoltenVK has only Apple system dynamic dependencies"
+        fi
+
         if [ -n "$EXPECTED_ENTS" ]; then
             if codesign --verify --strict "$MVK" >/dev/null 2>&1; then
                 pass "embedded MoltenVK code signature verifies"

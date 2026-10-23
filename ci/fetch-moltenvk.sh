@@ -255,9 +255,16 @@ verify_dylib() {
         r=1
     fi
 
-    # The embedded iOS binary must not rely on another app-bundled dylib that this
-    # packaging flow does not provide. Its own LC_ID_DYLIB is the first otool line.
-    local dependency dependency_list
+    # otool -L lists a dylib's LC_ID_DYLIB as its first entry, before actual loads.
+    # Identify that entry explicitly and skip only that exact value; @rpath and
+    # @loader_path dependencies remain subject to the system-library allowlist.
+    local dependency dependency_list install_id install_id_list
+    local install_id_seen=0 first_dependency=1
+    install_id_list="$(otool -D "$f" 2>/dev/null)" || {
+        _v "could not inspect Mach-O install ID with otool -D"
+        r=1
+    }
+    install_id="$(printf '%s\n' "$install_id_list" | sed -n '2{s/^[[:space:]]*//;p;}')"
     dependency_list="$(otool -L "$f" 2>/dev/null)" || {
         _v "could not inspect Mach-O dynamic dependencies with otool -L"
         r=1
@@ -268,11 +275,23 @@ verify_dylib() {
     fi
     while IFS= read -r dependency; do
         [ -n "$dependency" ] || continue
+        if [ "$first_dependency" = 1 ]; then
+            first_dependency=0
+            if [ -n "$install_id" ] && [ "$dependency" = "$install_id" ]; then
+                install_id_seen=1
+                continue
+            fi
+        fi
         case "$dependency" in
             /System/Library/*|/usr/lib/*) : ;;
             *) _v "non-system dynamic dependency: $dependency"; r=1 ;;
         esac
     done < <(printf '%s\n' "$dependency_list" | sed '1d; s/^[[:space:]]*//; s/ (compatibility version.*$//')
+
+    if [ -n "$install_id" ] && [ "$install_id_seen" != 1 ]; then
+        _v "LC_ID_DYLIB from otool -D did not match the first otool -L entry"
+        r=1
+    fi
 
     return $r
 }
@@ -650,6 +669,10 @@ chmod u+w "$STAGED_CANDIDATE"
 # the enclosing .app.
 install_name_tool -id "@rpath/libMoltenVK.dylib" "$STAGED_CANDIDATE" ||
     die "install_name_tool could not rewrite the install name of $STAGED_CANDIDATE"
+
+REWRITTEN_ID="$(otool -D "$STAGED_CANDIDATE" 2>/dev/null | sed -n '2{s/^[[:space:]]*//;p;}')"
+[ "$REWRITTEN_ID" = "@rpath/libMoltenVK.dylib" ] ||
+    die "install_name_tool did not set the expected LC_ID_DYLIB (got '${REWRITTEN_ID:-<none>}')."
 
 # Re-verify the staged copy. lipo -thin and install_name_tool both rewrite the file;
 # checking the artifact we are actually shipping costs nothing.
