@@ -124,7 +124,6 @@ class SettingsFragmentPresenter(
             ) {
                 add(IntSetting.RENDERER_FRAME_GEN_FLOW_SCALE.key)
             }
-            add(BooleanSetting.RENDERER_FRAME_GEN_FP16.key)
         }
     }
 
@@ -550,18 +549,17 @@ class SettingsFragmentPresenter(
             add(BooleanSetting.RENDERER_FORCE_MAX_CLOCK.key)
             add(BooleanSetting.RENDERER_REACTIVE_FLUSHING.key)
             add(BooleanSetting.ENABLE_BUFFER_HISTORY.key)
-            add(BooleanSetting.ENABLE_GPU_BUFFER_READBACK.key)
             add(BooleanSetting.USE_OPTIMIZED_VERTEX_BUFFERS.key)
 
             add(HeaderSetting(R.string.hacks))
 
             add(BooleanSetting.SKIP_CPU_INNER_INVALIDATION.key)
+            add(BooleanSetting.NCE_INVALIDATION_GPU_READBACK.key)
             add(BooleanSetting.FIX_BLOOM_EFFECTS.key)
             add(BooleanSetting.EMULATE_BGR565.key)
             add(BooleanSetting.RENDERER_ASYNCHRONOUS_SHADERS.key)
             add(IntSetting.ANDROID_PIPELINE_WORKERS.key)
             add(BooleanSetting.RENDERER_ASYNCHRONOUS_GPU_EMULATION.key)
-            add(BooleanSetting.RENDERER_ASYNC_PRESENTATION.key)
             add(SettingsItem.GPU_UNSWIZZLE_COMBINED)
 
             add(HeaderSetting(R.string.extensions))
@@ -1553,7 +1551,6 @@ class SettingsFragmentPresenter(
                 add(BooleanSetting.DUMP_GUEST_SHADERS.key)
                 add(BooleanSetting.GPU_LOG_SHADER_DUMPS.key)
                 add(BooleanSetting.DUMP_MACROS.key)
-                add(BooleanSetting.RENDERER_FRAME_GEN_DUMP_FLOW.key)
                 add(BooleanSetting.GPU_LOG_MEMORY_TRACKING.key)
                 add(BooleanSetting.GPU_LOG_DRIVER_DEBUG.key)
                 add(IntSetting.GPU_LOG_RING_BUFFER_SIZE.key)

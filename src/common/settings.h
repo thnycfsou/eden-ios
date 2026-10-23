@@ -176,8 +176,13 @@ struct Values {
     SwitchableSetting<bool> enable_overlay{linkage, false, "enable_overlay", Category::LibraryApplet};
 
     // Audio
-    SwitchableSetting<AudioEngine> sink_id{linkage, AudioEngine::Auto, "output_engine",
-                                           Category::Audio, Specialization::RuntimeList};
+    SwitchableSetting<AudioEngine> sink_id{linkage,
+#ifdef __ANDROID__
+                                           AudioEngine::Sdl3,
+#else
+                                           AudioEngine::Auto,
+#endif
+                                           "output_engine", Category::Audio, Specialization::RuntimeList};
     SwitchableSetting<std::string> audio_output_device_id{
                                                           linkage, "auto", "output_device", Category::Audio, Specialization::RuntimeList};
     SwitchableSetting<std::string> audio_input_device_id{
@@ -479,7 +484,7 @@ struct Values {
                                                       &frame_gen};
 
     SwitchableSetting<u32, true> frame_gen_queue_target{linkage,
-                                                        1,
+                                                        0,
                                                         0,
                                                         2,
                                                         "frame_gen_queue_target",
@@ -489,19 +494,11 @@ struct Values {
                                                         false,
                                                         &frame_gen};
 
-    SwitchableSetting<bool> frame_gen_fp16{linkage,      true,  "frame_gen_fp16", Category::Renderer,
-                                           Specialization::Default, true, false, &frame_gen};
-
     SwitchableSetting<bool> frame_gen_dump_flow{linkage, false, "frame_gen_dump_flow",
                                                 Category::Renderer};
 
-    SwitchableSetting<bool> use_asynchronous_gpu_emulation{linkage,
-#ifdef __ANDROID__
-        false,
-#else
-        true,
-#endif
-        "use_asynchronous_gpu_emulation", Category::Renderer};
+    SwitchableSetting<bool> use_asynchronous_gpu_emulation{linkage, true, "use_asynchronous_gpu_emulation",
+                                                           Category::Renderer};
     // *nix platforms may have issues with the borderless windowed fullscreen mode.
     // Default to exclusive fullscreen on these platforms for now.
     SwitchableSetting<FullscreenMode, true> fullscreen_mode{linkage,
@@ -548,7 +545,7 @@ struct Values {
     SwitchableSetting<GpuFenceBehavior, true> gpu_fence_behavior{linkage,
                                                                  GpuFenceBehavior::Default,
                                                                  GpuFenceBehavior::Default,
-                                                                 GpuFenceBehavior::Strict,
+                                                                 GpuFenceBehavior::Accurate,
                                                                  "gpu_fence_behavior",
                                                                  Category::RendererAdvanced,
                                                                  Specialization::Default,
@@ -560,7 +557,7 @@ struct Values {
                                                            "vram_usage_mode",
                                                            Category::RendererAdvanced};
 
-    SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Gpu,
+    SwitchableSetting<NvdecEmulation> nvdec_emulation{linkage, NvdecEmulation::Cpu,
                                                       "nvdec_emulation", Category::RendererAdvanced};
 
     SwitchableSetting<AnisotropyMode, true> max_anisotropy{linkage,
@@ -662,9 +659,11 @@ struct Values {
                                                         Specialization::Default,
                                                         true,
                                                         true};
+    SwitchableSetting<bool> nce_invalidation_gpu_readback{
+        linkage, false, "nce_invalidation_gpu_readback", Category::RendererHacks};
     SwitchableSetting<bool> async_presentation{linkage,
 #ifdef __ANDROID__
-                                               false,
+                                               true,
 #else
                                                false,
 #endif
@@ -675,16 +674,6 @@ struct Values {
 
     SwitchableSetting<bool> emulate_bgr565{linkage, false, "emulate_bgr565",
                                             Category::RendererHacks};
-
-    SwitchableSetting<bool> rescale_hack{linkage, false, "rescale_hack",
-                                         Category::RendererHacks};
-    SwitchableSetting<bool> enable_gpu_buffer_readback{linkage,
-                                                       false,
-                                                       "enable_gpu_buffer_readback",
-                                                       Category::RendererAdvanced,
-                                                       Specialization::Default,
-                                                       true,
-                                                       true};
 
     SwitchableSetting<bool> use_asynchronous_shaders{linkage, false, "use_asynchronous_shaders",
                                                      Category::RendererHacks};
@@ -962,7 +951,7 @@ struct Values {
     // Network
     Setting<std::string> network_interface{linkage, std::string(), "network_interface",
                                            Category::Network};
-    SwitchableSetting<bool> airplane_mode{linkage, false, "airplane_mode", Category::Network};
+    SwitchableSetting<bool> airplane_mode{linkage, true, "airplane_mode", Category::Network};
 
     // WebService
     Setting<std::string> web_api_url{linkage, "api.ynet-fun.xyz", "web_api_url",
@@ -1002,7 +991,6 @@ bool IsDMALevelSafe();
 bool IsGPUFenceBehaviorDefault();
 bool IsGPUFenceBehaviorBalanced();
 bool IsGPUFenceBehaviorAccurate();
-bool IsGPUFenceBehaviorStrict();
 
 bool IsFastmemEnabled();
 void SetNceEnabled(bool is_64bit);

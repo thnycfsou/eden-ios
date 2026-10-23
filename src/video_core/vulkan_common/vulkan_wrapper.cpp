@@ -464,8 +464,6 @@ Instance Instance::Create(u32 version, Span<const char*> layers, Span<const char
                                  ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
                                  : VkFlags{};
     // DO NOT TOUCH OR CHANGE THE ENGINE NAME/APPLICATION NAME, breaks RNDA3!!
-    // AMD drivers have fixes for Yuzu
-    // if remove => gloom + yellow line glitch appears
 #ifdef __ANDROID__
     const VkApplicationInfo application_info{
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
