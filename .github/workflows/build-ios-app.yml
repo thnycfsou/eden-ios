@@ -71,12 +71,33 @@ jobs:
 
       - name: Install build tools
         run: |
-          brew update --quiet || true
-          brew install cmake ninja glslang ccache xcodegen \
-            || brew upgrade cmake ninja glslang ccache xcodegen || true
+          set -euo pipefail
+
+          missing_formulae=()
+          if ! command -v glslangValidator >/dev/null 2>&1; then
+            missing_formulae+=(glslang)
+          fi
+          if ! command -v ccache >/dev/null 2>&1; then
+            missing_formulae+=(ccache)
+          fi
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            missing_formulae+=(xcodegen)
+          fi
+
+          if ((${#missing_formulae[@]} > 0)); then
+            brew install --force-bottle "${missing_formulae[@]}"
+          fi
+
+          command -v cmake
+          command -v ninja
+          command -v glslangValidator
+          command -v ccache
+          command -v xcodegen
           cmake --version
+          ninja --version
+          glslangValidator --version
+          ccache --version
           xcodegen --version
-          echo "glslangValidator: $(command -v glslangValidator || echo MISSING)"
 
       # Byte-identical key and restore-keys to build-ios-core.yml, on purpose.
       #
