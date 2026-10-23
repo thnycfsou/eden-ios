@@ -293,7 +293,7 @@ struct System::Impl {
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.gpu_create.begin");
         VideoCore::CreateGPU(gpu_core, emu_window, system);
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.gpu_create.done available={}",
-                    gpu_core != nullptr);
+                    gpu_core.has_value());
         if (!gpu_core)
             return SystemResultStatus::ErrorVideoCore;
 
