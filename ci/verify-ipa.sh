@@ -4,7 +4,7 @@
 #
 # Gate an IPA before it is uploaded or released.
 #
-#   verify-ipa.sh <path to .ipa> [expected-entitlements.plist]
+#   verify-ipa.sh <path to .ipa> [expected-entitlements.plist] [expected-repo expected-tag expected-asset expected-signed-sha256]
 #
 # Adapted from /Users/kiddreads/cemu-ios-muffin/ci/verify-ipa.sh. Two changes from that
 # script are deliberate and are the reason this is not a straight copy - see checks 9
@@ -19,8 +19,19 @@
 
 set -uo pipefail
 
-IPA="${1:?usage: verify-ipa.sh <ipa> [expected-entitlements.plist]}"
+IPA="${1:?usage: verify-ipa.sh <ipa> [expected-entitlements.plist] [expected-repo expected-tag expected-asset expected-signed-sha256]}"
 EXPECTED_ENTS="${2:-}"
+EXPECTED_MOLTENVK_REPO="${3:-}"
+EXPECTED_MOLTENVK_VERSION="${4:-}"
+EXPECTED_MOLTENVK_ASSET="${5:-}"
+EXPECTED_MOLTENVK_SHA256="${6:-}"
+
+if [ -n "$EXPECTED_MOLTENVK_REPO$EXPECTED_MOLTENVK_VERSION$EXPECTED_MOLTENVK_ASSET$EXPECTED_MOLTENVK_SHA256" ] &&
+   { [ -z "$EXPECTED_MOLTENVK_REPO" ] || [ -z "$EXPECTED_MOLTENVK_VERSION" ] ||
+     [ -z "$EXPECTED_MOLTENVK_ASSET" ] || [ -z "$EXPECTED_MOLTENVK_SHA256" ]; }; then
+    echo "verify-ipa.sh: MoltenVK expectations must include repo, tag, asset, and signed SHA-256" >&2
+    exit 2
+fi
 
 FAILURES=0
 CHECKS=0
@@ -173,9 +184,60 @@ fi
 
 # --- 10. MoltenVK reachable by a route vulkan_library.cpp accepts -----------
 # src/video_core/vulkan_common/vulkan_library.cpp:28-53 tries, on iOS:
-#   $LIBVULKAN_PATH, <bundle>/Frameworks/libMoltenVK.dylib,
+#   <bundle>/Frameworks/libMoltenVK.dylib, $LIBVULKAN_PATH,
 #   <bundle>/Frameworks/libvulkan.1.dylib, then dlopen(nullptr).
-if [ -f "$APP/Frameworks/libMoltenVK.dylib" ] || [ -f "$APP/Frameworks/libvulkan.1.dylib" ]; then
+if [ -n "$EXPECTED_MOLTENVK_REPO" ]; then
+    MVK="$APP/Frameworks/libMoltenVK.dylib"
+    if [ ! -f "$MVK" ]; then
+        fail "expected embedded MoltenVK is missing from the IPA"
+    else
+        pass "expected MoltenVK file present at the iOS loader path"
+        actual_sha="$(shasum -a 256 "$MVK" | awk '{print $1}')"
+        if [ "$actual_sha" = "$EXPECTED_MOLTENVK_SHA256" ]; then
+            pass "IPA MoltenVK matches the signed binary that was packaged (SHA-256 $actual_sha)"
+        else
+            fail "IPA MoltenVK SHA-256 mismatch (expected $EXPECTED_MOLTENVK_SHA256, got $actual_sha)"
+        fi
+
+        archs="$(lipo -archs "$MVK" 2>/dev/null || echo '')"
+        if [ "$archs" = 'arm64' ]; then
+            pass "MoltenVK architecture is arm64"
+        else
+            fail "MoltenVK architecture mismatch: $archs (expected arm64 only)"
+        fi
+
+        platform=""
+        if command -v vtool >/dev/null 2>&1; then
+            platform="$(vtool -show-build "$MVK" 2>/dev/null | awk '/^[[:space:]]*platform /{print $2; exit}')"
+        fi
+        if [ -z "$platform" ]; then
+            platform="$(otool -l "$MVK" 2>/dev/null | awk '/^[[:space:]]*platform /{print $2; exit}')"
+            [ "$platform" != '2' ] || platform='IOS'
+        fi
+        if [ "$platform" = 'IOS' ]; then
+            pass "MoltenVK Mach-O platform is iphoneos"
+        else
+            fail "MoltenVK Mach-O platform mismatch: ${platform:-unknown} (expected IOS)"
+        fi
+
+        if nm -g --defined-only "$MVK" 2>/dev/null | grep -q '_vkGetInstanceProcAddr'; then
+            pass "MoltenVK exports vkGetInstanceProcAddr"
+        else
+            fail "MoltenVK does not export vkGetInstanceProcAddr"
+        fi
+
+        if [ -n "$EXPECTED_ENTS" ]; then
+            if codesign --verify --strict "$MVK" >/dev/null 2>&1; then
+                pass "embedded MoltenVK code signature verifies"
+            else
+                fail "embedded MoltenVK code signature is invalid"
+            fi
+        else
+            info "unsigned IPA variant: nested MoltenVK signature is intentionally absent"
+        fi
+        info "expected MoltenVK source: $EXPECTED_MOLTENVK_REPO@$EXPECTED_MOLTENVK_VERSION ($EXPECTED_MOLTENVK_ASSET)"
+    fi
+elif [ -f "$APP/Frameworks/libMoltenVK.dylib" ] || [ -f "$APP/Frameworks/libvulkan.1.dylib" ]; then
     pass "Vulkan loader present in Frameworks/"
     for d in "$APP/Frameworks"/*.dylib; do
         [ -f "$d" ] || continue

@@ -75,18 +75,12 @@
 # consistent and so anything that ever does link it resolves correctly.
 #
 # ===========================================================================
-# WHICH FORK, AND WHY THE DEFAULT IS NOT KHRONOS
+# WHICH IOS RELEASE IS PINNED
 # ===========================================================================
-# Eden's own cpmfile.json:162-168 pins MoltenVK to
-#     repo    V380-Ori/Ryujinx.MoltenVK
-#     version v1.4.1-ryujinx
-#     artifact MoltenVK-macOS.tar
-# - a fork, not KhronosGroup/MoltenVK. That fork publishes MoltenVK-ios.tar alongside
-# MoltenVK-macos.tar at the same tag, so defaulting to it keeps the iOS and macOS
-# halves of this project on ONE MoltenVK, which is what you want when a rendering bug
-# has to be reproduced on a Mac. Set MOLTENVK_REPO=KhronosGroup/MoltenVK to use
-# upstream instead; both layouts are handled, because nothing here is matched by a
-# hardcoded path.
+# The iOS app uses the official KhronosGroup/MoltenVK v1.4.2 release. MoltenVK 1.4.1
+# has a documented SPIRV-Cross subgroup barrier code-generation bug (KhronosGroup/
+# MoltenVK#2700), and 1.4.2 fixes that issue. The separate CPM pin in cpmfile.json is
+# for the desktop build and does not supply the dylib embedded into the iOS app.
 #
 # Note the remaining upstream gap, which is NOT this script's to fix: externals/
 # CMakeLists.txt:433 guards the MoltenVK block with a plain `if (APPLE)`, true for iOS,
@@ -138,6 +132,14 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAGE_DIR="${EDEN_MOLTENVK_STAGE:-$REPO_ROOT/build-ios/moltenvk}"
 DYLIB="$STAGE_DIR/libMoltenVK.dylib"
 STAMP="$STAGE_DIR/PROVENANCE.txt"
+MOLTENVK_REPO="${MOLTENVK_REPO:-KhronosGroup/MoltenVK}"
+MOLTENVK_VERSION="${MOLTENVK_VERSION:-v1.4.2}"
+ASSET_NAME="${MOLTENVK_ASSET:-MoltenVK-ios.tar}"
+PINNED_RELEASE_ASSET_SHA256=""
+if [ "$MOLTENVK_REPO" = 'KhronosGroup/MoltenVK' ] &&
+   [ "$MOLTENVK_VERSION" = 'v1.4.2' ] && [ "$ASSET_NAME" = 'MoltenVK-ios.tar' ]; then
+    PINNED_RELEASE_ASSET_SHA256='b5d947b1660e6e9fed40b9cd2387e160aaab9e80b775c0cef7e14059405178c1'
+fi
 
 # Broad on purpose; see the header. Bytes.
 readonly MIN_BYTES=$((1 * 1024 * 1024))
@@ -235,10 +237,10 @@ verify_dylib() {
     fi
 
     archs="$(lipo -archs "$f" 2>/dev/null || echo '')"
-    case " $archs " in
-        *" arm64 "*) : ;;
-        *) _v "no arm64 slice (lipo -archs: ${archs:-<none>})"; r=1 ;;
-    esac
+    if [ "$archs" != "arm64" ]; then
+        _v "wrong architecture (lipo -archs: ${archs:-<none>}; need arm64 only)"
+        r=1
+    fi
 
     plat="$(describe_platform "$f")"
     case "$plat" in
@@ -253,6 +255,25 @@ verify_dylib() {
         r=1
     fi
 
+    # The embedded iOS binary must not rely on another app-bundled dylib that this
+    # packaging flow does not provide. Its own LC_ID_DYLIB is the first otool line.
+    local dependency dependency_list
+    dependency_list="$(otool -L "$f" 2>/dev/null)" || {
+        _v "could not inspect Mach-O dynamic dependencies with otool -L"
+        r=1
+    }
+    if [ -z "$dependency_list" ]; then
+        _v "Mach-O dynamic dependency list is empty"
+        r=1
+    fi
+    while IFS= read -r dependency; do
+        [ -n "$dependency" ] || continue
+        case "$dependency" in
+            /System/Library/*|/usr/lib/*) : ;;
+            *) _v "non-system dynamic dependency: $dependency"; r=1 ;;
+        esac
+    done < <(printf '%s\n' "$dependency_list" | sed '1d; s/ (compatibility version.*$//')
+
     return $r
 }
 
@@ -264,12 +285,61 @@ describe_staged() {
         "$(file_size "$f")"
 }
 
+sha256_file() { shasum -a 256 "$1" | awk '{print $1}'; }
+
+validate_provenance() {
+    local f="$1" expected_sha actual_sha expected_url archive_sha key count
+    [ -f "$f" ] || { warn "missing MoltenVK binary: $f"; return 1; }
+    [ -f "$STAMP" ] || { warn "missing MoltenVK provenance: $STAMP"; return 1; }
+    for key in repo tag asset url member archs platform bytes sha256 archive_sha256 staged; do
+        count="$(awk -F= -v key="$key" '$1 == key { count++ } END { print count + 0 }' "$STAMP")"
+        [ "$count" = 1 ] || { warn "MoltenVK provenance is incomplete or inconsistent ($key)"; return 1; }
+    done
+    grep -Fqx "repo=$MOLTENVK_REPO" "$STAMP" || { warn "MoltenVK provenance repo mismatch"; return 1; }
+    grep -Fqx "tag=$MOLTENVK_VERSION" "$STAMP" || { warn "MoltenVK provenance tag mismatch"; return 1; }
+    grep -Fqx "asset=$ASSET_NAME" "$STAMP" || { warn "MoltenVK provenance asset mismatch"; return 1; }
+    grep -Fqx 'platform=IOS' "$STAMP" || { warn "MoltenVK provenance platform mismatch"; return 1; }
+    grep -Fqx 'archs=arm64' "$STAMP" || { warn "MoltenVK provenance architecture mismatch"; return 1; }
+    expected_url="https://github.com/$MOLTENVK_REPO/releases/download/$MOLTENVK_VERSION/$ASSET_NAME"
+    if [ -n "${EDEN_MOLTENVK_TARBALL:-}" ]; then
+        grep -Fqx "url=file://$EDEN_MOLTENVK_TARBALL" "$STAMP" ||
+            { warn "MoltenVK provenance URL mismatch"; return 1; }
+    else
+        grep -Fqx "url=$expected_url" "$STAMP" ||
+            { warn "MoltenVK provenance URL mismatch"; return 1; }
+    fi
+    expected_sha="$(sed -n 's/^sha256=//p' "$STAMP")"
+    [[ "$expected_sha" =~ ^[0-9a-f]{64}$ ]] || { warn "invalid or incomplete MoltenVK provenance SHA-256"; return 1; }
+    actual_sha="$(sha256_file "$f")"
+    [ "$actual_sha" = "$expected_sha" ] || { warn "MoltenVK binary SHA-256 does not match provenance"; return 1; }
+    verify_dylib "$f" --quiet || { warn "MoltenVK binary failed Mach-O verification"; return 1; }
+    [ "$(lipo -archs "$f" 2>/dev/null)" = 'arm64' ] || { warn "MoltenVK must contain arm64 only"; return 1; }
+    [ "$(describe_platform "$f")" = 'IOS' ] || { warn "MoltenVK is not an iphoneos binary"; return 1; }
+    archive_sha="$(sed -n 's/^archive_sha256=//p' "$STAMP")"
+    [[ "$archive_sha" =~ ^[0-9a-f]{64}$ ]] || { warn "invalid or incomplete MoltenVK archive SHA-256"; return 1; }
+    if [ -n "$PINNED_RELEASE_ASSET_SHA256" ] && [ "$archive_sha" != "$PINNED_RELEASE_ASSET_SHA256" ]; then
+        warn "MoltenVK release archive SHA-256 does not match the pinned official asset"
+        return 1
+    fi
+}
+
+write_github_env() {
+    [ -n "${GITHUB_ENV:-}" ] || return 0
+    {
+        echo "EDEN_MOLTENVK_EXPECTED_REPO=$MOLTENVK_REPO"
+        echo "EDEN_MOLTENVK_EXPECTED_VERSION=$MOLTENVK_VERSION"
+        echo "EDEN_MOLTENVK_EXPECTED_ASSET=$ASSET_NAME"
+        echo "EDEN_MOLTENVK_EXPECTED_SHA256=$(sha256_file "$DYLIB")"
+        echo "EDEN_MOLTENVK_ARCHIVE_SHA256=$(sed -n 's/^archive_sha256=//p' "$STAMP")"
+    } >> "$GITHUB_ENV"
+}
+
 # ===========================================================================
 # --embed
 # ===========================================================================
 if [ "${1:-}" = "--embed" ]; then
     APP_DIR="${2:?usage: fetch-moltenvk.sh --embed <path to .app>}"
-    require_tools lipo otool nm file
+    require_tools lipo otool nm file shasum
 
     # An explicit override wins, so a developer with a dylib from elsewhere can point
     # at it without touching this script. Set-but-missing is a typo, not a fallback.
@@ -312,14 +382,14 @@ if [ "${1:-}" = "--embed" ]; then
     # placed by hand, or may come from EDEN_MOLTENVK_DYLIB. Shipping a wrong dylib is
     # strictly worse than shipping none, because the failure moves from a clear log
     # line to a dlopen that half-works.
-    if ! verify_dylib "$DYLIB"; then
-        die "refusing to embed $DYLIB - it is not an iphoneos arm64 MoltenVK (see above)."
-    fi
+    validate_provenance "$DYLIB" || die "refusing to embed MoltenVK without matching version, origin, platform, architecture, and SHA-256 provenance."
 
     mkdir -p "$APP_DIR/Frameworks"
     cp -f "$DYLIB" "$APP_DIR/Frameworks/libMoltenVK.dylib"
+    [ "$(sha256_file "$APP_DIR/Frameworks/libMoltenVK.dylib")" = "$(sha256_file "$DYLIB")" ] ||
+        die "embedded MoltenVK differs from the validated staged binary."
     say "embedded -> $APP_DIR/Frameworks/libMoltenVK.dylib"
-    say "           $(describe_staged "$APP_DIR/Frameworks/libMoltenVK.dylib")"
+    say "           $MOLTENVK_REPO@$MOLTENVK_VERSION ($ASSET_NAME), $(describe_staged "$APP_DIR/Frameworks/libMoltenVK.dylib")"
 
     # NOTE for whoever signs this: codesign does NOT sign nested code automatically.
     # Frameworks/libMoltenVK.dylib must be signed BEFORE the enclosing .app, or the
@@ -327,34 +397,32 @@ if [ "${1:-}" = "--embed" ]; then
     exit 0
 fi
 
+if [ "${1:-}" = "--verify-embedded" ]; then
+    APP_DIR="${2:?usage: fetch-moltenvk.sh --verify-embedded <path to .app>}"
+    require_tools lipo otool nm file shasum
+    validate_provenance "$DYLIB" || die "staged MoltenVK provenance is invalid."
+    validate_provenance "$APP_DIR/Frameworks/libMoltenVK.dylib" || die "built app does not contain the expected MoltenVK binary."
+    say "verified app MoltenVK: $MOLTENVK_REPO@$MOLTENVK_VERSION ($ASSET_NAME), sha256=$(sha256_file "$APP_DIR/Frameworks/libMoltenVK.dylib")"
+    exit 0
+fi
+
 # ===========================================================================
 # fetch + verify + stage
 # ===========================================================================
-require_tools curl tar lipo otool nm file install_name_tool
+require_tools curl tar lipo otool nm file shasum install_name_tool
 
 mkdir -p "$STAGE_DIR"
 
-# Do not blindly trust an existing file - an interrupted earlier run can leave a short
-# one, and a hand-placed one can be the macOS dylib.
+# Reuse only when complete provenance and binary integrity match the selected release.
 if [ -f "$DYLIB" ]; then
-    if verify_dylib "$DYLIB" --quiet; then
-        say "already staged and verified: $DYLIB"
+    if validate_provenance "$DYLIB"; then
+        say "already staged with matching provenance: $MOLTENVK_REPO@$MOLTENVK_VERSION ($ASSET_NAME)"
         say "  $(describe_staged "$DYLIB")"
+        write_github_env
         exit 0
     fi
-    warn "a file exists at $DYLIB but does not verify; re-fetching."
-    verify_dylib "$DYLIB" || true
-    rm -f "$DYLIB"
+    warn "staged file or provenance is stale/incomplete; fetching the selected release again."
 fi
-
-MOLTENVK_REPO="${MOLTENVK_REPO:-V380-Ori/Ryujinx.MoltenVK}"
-# Matches Eden's own pin, cpmfile.json:167. Keep the two in step when bumping.
-if [ "$MOLTENVK_REPO" = "V380-Ori/Ryujinx.MoltenVK" ]; then
-    MOLTENVK_VERSION="${MOLTENVK_VERSION:-v1.4.1-ryujinx}"
-else
-    MOLTENVK_VERSION="${MOLTENVK_VERSION:-v1.4.2}"
-fi
-ASSET_NAME="${MOLTENVK_ASSET:-MoltenVK-ios.tar}"
 
 # Scratch on the same volume as the repo, not $TMPDIR. The repo commonly lives on an
 # external work volume precisely because the system disk has no room.
@@ -395,6 +463,7 @@ if [ -n "${EDEN_MOLTENVK_TARBALL:-}" ]; then
     say "using local archive $EDEN_MOLTENVK_TARBALL (skipping the download)"
     ASSET_URL="file://$EDEN_MOLTENVK_TARBALL"
     cp -f "$EDEN_MOLTENVK_TARBALL" "$TARBALL"
+    EXPECTED_ASSET_SHA256="$PINNED_RELEASE_ASSET_SHA256"
 else
 
 API="https://api.github.com/repos/$MOLTENVK_REPO/releases/tags/$MOLTENVK_VERSION"
@@ -407,14 +476,15 @@ AUTH=()
 
 RELEASE_JSON="$TMP/release.json"
 if ! curl -sfL --retry 3 --retry-delay 2 ${AUTH[@]+"${AUTH[@]}"} -H 'Accept: application/vnd.github+json' "$API" -o "$RELEASE_JSON"; then
-    # The pinned Ryujinx release and its iOS asset are independently verified.
+    # The pinned official release and its iOS asset are independently verified.
     # An API/network/rate-limit failure is NOT proof the release is missing.
     # Use its exact published asset URL, then run the normal archive/Mach-O checks.
-    if [ "$MOLTENVK_REPO" = "V380-Ori/Ryujinx.MoltenVK" ] &&
-       [ "$MOLTENVK_VERSION" = "v1.4.1-ryujinx" ] &&
+    if [ "$MOLTENVK_REPO" = "KhronosGroup/MoltenVK" ] &&
+       [ "$MOLTENVK_VERSION" = "v1.4.2" ] &&
        [ "$ASSET_NAME" = "MoltenVK-ios.tar" ]; then
         warn "GitHub Releases API unavailable; trying the pinned iOS asset directly."
-        ASSET_URL="https://github.com/V380-Ori/Ryujinx.MoltenVK/releases/download/v1.4.1-ryujinx/MoltenVK-ios.tar"
+        ASSET_URL="https://github.com/KhronosGroup/MoltenVK/releases/download/v1.4.2/MoltenVK-ios.tar"
+        EXPECTED_ASSET_SHA256="$PINNED_RELEASE_ASSET_SHA256"
         API_FALLBACK=1
     else
         die "GitHub Releases API request failed for $MOLTENVK_REPO@$MOLTENVK_VERSION.
@@ -425,17 +495,23 @@ fi
 
 # Deliberately no jq: it is not on a stock macOS runner. python3 is.
 if [ "${API_FALLBACK:-0}" != "1" ]; then
-ASSET_URL="$(python3 - "$RELEASE_JSON" "$ASSET_NAME" <<'PY'
+ASSET_METADATA="$(python3 - "$RELEASE_JSON" "$ASSET_NAME" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
     rel = json.load(fh)
 want = sys.argv[2]
 for a in rel.get("assets", []):
     if a.get("name") == want:
-        print(a.get("browser_download_url", ""))
+        print(a.get("browser_download_url", ""), a.get("digest", "") or "none")
         break
 PY
 )"
+ASSET_URL="${ASSET_METADATA%% *}"
+ASSET_DIGEST="${ASSET_METADATA#* }"
+EXPECTED_ASSET_SHA256="${ASSET_DIGEST#sha256:}"
+if [ "$ASSET_DIGEST" = 'none' ]; then
+    EXPECTED_ASSET_SHA256="$PINNED_RELEASE_ASSET_SHA256"
+fi
 
 if [ -z "$ASSET_URL" ]; then
     warn "release '$MOLTENVK_VERSION' in $MOLTENVK_REPO has no asset named '$ASSET_NAME'."
@@ -470,6 +546,13 @@ TAR_BYTES="$(file_size "$TARBALL")"
 
 say "downloaded $((TAR_BYTES / 1024 / 1024)) MB"
 fi
+
+ACTUAL_ASSET_SHA256="$(sha256_file "$TARBALL")"
+if [ -n "$EXPECTED_ASSET_SHA256" ] && [ "$ACTUAL_ASSET_SHA256" != "$EXPECTED_ASSET_SHA256" ]; then
+    die "downloaded $ASSET_NAME SHA-256 mismatch (expected $EXPECTED_ASSET_SHA256, got $ACTUAL_ASSET_SHA256)."
+fi
+EXPECTED_ASSET_SHA256="$ACTUAL_ASSET_SHA256"
+say "archive sha256 $EXPECTED_ASSET_SHA256"
 
 # ---------------------------------------------------------------------------
 # List before extracting. The archive expands to several hundred MB, nearly all of it
@@ -553,8 +636,9 @@ if [ -z "$FOUND" ]; then
     which is strictly worse than the current honest 'No Vulkan library found'."
 fi
 
-cp -f "$FOUND" "$DYLIB"
-chmod u+w "$DYLIB"
+STAGED_CANDIDATE="$TMP/libMoltenVK.dylib"
+cp -f "$FOUND" "$STAGED_CANDIDATE"
+chmod u+w "$STAGED_CANDIDATE"
 
 # The framework binary's LC_ID_DYLIB is @rpath/MoltenVK.framework/MoltenVK. Eden opens
 # an absolute path so dlopen does not care, but leaving a stale id pointing at a
@@ -564,26 +648,35 @@ chmod u+w "$DYLIB"
 # This edits the Mach-O and so invalidates any signature it carried. That is fine and
 # expected - see the signing note in --embed; the dylib is signed after staging, before
 # the enclosing .app.
-install_name_tool -id "@rpath/libMoltenVK.dylib" "$DYLIB" ||
-    die "install_name_tool could not rewrite the install name of $DYLIB"
+install_name_tool -id "@rpath/libMoltenVK.dylib" "$STAGED_CANDIDATE" ||
+    die "install_name_tool could not rewrite the install name of $STAGED_CANDIDATE"
 
 # Re-verify the staged copy. lipo -thin and install_name_tool both rewrite the file;
 # checking the artifact we are actually shipping costs nothing.
-verify_dylib "$DYLIB" || die "the staged copy at $DYLIB failed verification after rewriting."
+verify_dylib "$STAGED_CANDIDATE" || die "the candidate at $STAGED_CANDIDATE failed verification after rewriting."
 
+STAMP_CANDIDATE="$TMP/PROVENANCE.txt"
 {
-    echo "repo    $MOLTENVK_REPO"
-    echo "tag     $MOLTENVK_VERSION"
-    echo "asset   $ASSET_NAME"
-    echo "url     $ASSET_URL"
-    echo "member  $FOUND_MEMBER"
-    echo "archs   $(lipo -archs "$DYLIB" 2>/dev/null)"
-    echo "platform $(describe_platform "$DYLIB")"
-    echo "bytes   $(file_size "$DYLIB")"
-    echo "sha256  $(shasum -a 256 "$DYLIB" 2>/dev/null | cut -d' ' -f1)"
-    echo "staged  $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-} > "$STAMP"
+    echo "repo=$MOLTENVK_REPO"
+    echo "tag=$MOLTENVK_VERSION"
+    echo "asset=$ASSET_NAME"
+    echo "url=$ASSET_URL"
+    echo "member=$FOUND_MEMBER"
+    echo "archs=$(lipo -archs "$STAGED_CANDIDATE" 2>/dev/null)"
+    echo "platform=$(describe_platform "$STAGED_CANDIDATE")"
+    echo "bytes=$(file_size "$STAGED_CANDIDATE")"
+    echo "sha256=$(sha256_file "$STAGED_CANDIDATE")"
+    echo "archive_sha256=$EXPECTED_ASSET_SHA256"
+    echo "staged=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+} > "$STAMP_CANDIDATE"
+
+# Install the verified binary first and its matching stamp second. If interrupted
+# between the two renames, the next run rejects the digest mismatch and re-fetches.
+mv -f "$STAGED_CANDIDATE" "$DYLIB"
+mv -f "$STAMP_CANDIDATE" "$STAMP"
+validate_provenance "$DYLIB" || die "the staged MoltenVK binary failed its final provenance check."
 
 say "staged  $DYLIB"
 say "        $(describe_staged "$DYLIB")"
 say "        provenance in $STAMP"
+write_github_env

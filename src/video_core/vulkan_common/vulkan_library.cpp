@@ -7,6 +7,7 @@
 #include <string>
 
 #include "common/dynamic_library.h"
+#include "common/fs/fs.h"
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "video_core/vulkan_common/vulkan_library.h"
@@ -32,13 +33,24 @@ std::shared_ptr<Common::DynamicLibrary> OpenLibrary(
         Common::FS::GetBundleDirectory() / "Frameworks/libMoltenVK.dylib";
     const auto libvulkan_filename =
         Common::FS::GetBundleDirectory() / "Frameworks/libvulkan.1.dylib";
-    const char* library_paths[] = {std::getenv("LIBVULKAN_PATH"), libmoltenvk_filename.c_str(),
-                                   libvulkan_filename.c_str()};
+    // Prefer the versioned, signed binary shipped with this app. If it is present but
+    // cannot be loaded, fail instead of silently substituting another runtime.
     bool opened = false;
-    for (const auto& library_path : library_paths) {
-        if (library_path && library->Open(library_path)) {
-            opened = true;
-            break;
+    if (Common::FS::Exists(libmoltenvk_filename)) {
+        opened = library->Open(libmoltenvk_filename.c_str());
+        if (!opened) {
+            LOG_ERROR(Render_Vulkan, "Failed to load bundled MoltenVK at {}",
+                      libmoltenvk_filename.string());
+            return library;
+        }
+    } else {
+        const char* fallback_paths[] = {std::getenv("LIBVULKAN_PATH"),
+                                        libvulkan_filename.c_str()};
+        for (const auto& library_path : fallback_paths) {
+            if (library_path && library->Open(library_path)) {
+                opened = true;
+                break;
+            }
         }
     }
     if (!opened) {

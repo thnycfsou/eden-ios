@@ -375,13 +375,7 @@ struct System::Impl {
 
         // Set up the rest of the system.
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.begin");
-        SystemResultStatus init_result{};
-        try {
-            init_result = SetupForApplicationProcess(system, emu_window);
-        } catch (...) {
-            // SetupForApplicationProcess marks the system powered on only after all
-            // subsystems have been created. If a constructor throws earlier, the
-            // frontend's IsPoweredOn() guard cannot initiate rollback for us.
+        const auto cleanup_failed_setup = [this] {
             try {
                 ShutdownMainProcess();
             } catch (const std::exception& cleanup_exception) {
@@ -390,13 +384,22 @@ struct System::Impl {
             } catch (...) {
                 LOG_CRITICAL(Core, "Cleanup after application setup failure also failed");
             }
+        };
+        SystemResultStatus init_result{};
+        try {
+            init_result = SetupForApplicationProcess(system, emu_window);
+        } catch (...) {
+            // SetupForApplicationProcess marks the system powered on only after all
+            // subsystems have been created. If a constructor throws earlier, the
+            // frontend's IsPoweredOn() guard cannot initiate rollback for us.
+            cleanup_failed_setup();
             throw;
         }
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.done status={}",
                     static_cast<u32>(init_result));
         if (init_result != SystemResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to initialize system (Error {})!", int(init_result));
-            ShutdownMainProcess();
+            cleanup_failed_setup();
             return init_result;
         }
         // Waiting for GPU before initializing CPU

@@ -235,9 +235,8 @@ targets:
 
     postBuildScripts:
       # postBuild, not preBuild: the .app it writes into does not exist yet when a
-      # pre-build script runs. This is non-fatal when the dylib is absent - cut one is
-      # expected to link and package without MoltenVK, and fail at GPU init on device
-      # rather than at build time.
+      # pre-build script runs. Local builds may omit the dylib, but the IPA workflow
+      # requires the staged provenance and fails its pre-package check if embed fails.
       - name: Embed libMoltenVK.dylib into the app bundle
         basedOnDependencyAnalysis: false
         script: |

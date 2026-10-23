@@ -10,9 +10,9 @@ name: Build iOS App
 # Flow:
 #   install tools -> restore the SAME CPM cache entry as build-ios-core.yml
 #   -> configure with that workflow's flag list -> build the core targets
-#   -> re-run the libdynarmic Arm64-symbol check -> fetch device-arm64 MoltenVK
+#   -> re-run the libdynarmic Arm64-symbol check -> fetch and pin device-arm64 MoltenVK
 #   -> xcodegen generate -> xcodebuild CODE_SIGNING_ALLOWED=NO
-#   -> pack three IPAs (ad-hoc re-sign of the ONE .app) -> gate all three through
+#   -> pack four IPAs (ad-hoc re-sign of the ONE .app) -> gate all four through
 #      ci/verify-ipa.sh BEFORE any upload.
 #
 # WHAT THIS JOB DOES NOT CLAIM. It does not run a game. It does not prove JIT works on
@@ -46,6 +46,12 @@ env:
   SCHEME: Eden
   APP_NAME: Eden
   BUILD_DIR: build-ios
+  # Explicit iOS runtime pin. Change these three together only for a deliberate
+  # rollback; runner/repository environment variables cannot silently replace them.
+  MOLTENVK_REPO: KhronosGroup/MoltenVK
+  MOLTENVK_VERSION: v1.4.2
+  MOLTENVK_ASSET: MoltenVK-ios.tar
+  EDEN_MOLTENVK_REQUIRED: "1"
 
 jobs:
   app:
@@ -190,13 +196,11 @@ jobs:
             echo "::error::libdynarmic.a contains no Arm64 backend symbols"; exit 1
           fi
 
-      # Non-fatal by design: nothing in the iOS link references a vk* symbol
-      # (MOLTENVK_LIBRARY is consumed only by src/yuzu, ENABLE_QT=OFF), so a missing
-      # MoltenVK does not stop the app from building. It stops it from rendering on a
-      # device, which verify-ipa.sh reports as a warning.
+      # Nothing in the iOS link references a vk* symbol (MOLTENVK_LIBRARY is consumed
+      # only by src/yuzu, ENABLE_QT=OFF), so the fetch step is a required runtime gate.
+      # It pins source identity and digest before the app is built or packaged.
       - name: Fetch MoltenVK (iphoneos arm64)
         env:
-          EDEN_MOLTENVK_REQUIRED: "1"
           GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
@@ -230,6 +234,10 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
+            MOLTENVK_REPO="$MOLTENVK_REPO" \
+            MOLTENVK_VERSION="$MOLTENVK_VERSION" \
+            MOLTENVK_ASSET="$MOLTENVK_ASSET" \
+            EDEN_MOLTENVK_REQUIRED="$EDEN_MOLTENVK_REQUIRED" \
             build 2>&1 | tee "$GITHUB_WORKSPACE/xcodebuild.log"
 
       - name: Locate the product
@@ -245,7 +253,16 @@ jobs:
           echo "built: $APP"
           ls -la "$APP"
 
-      # Three IPAs from one .app. cemu-ios-muffin's workflow does the same
+      - name: Verify embedded MoltenVK before packaging
+        run: |
+          set -euo pipefail
+          [ "$EDEN_MOLTENVK_EXPECTED_REPO" = "$MOLTENVK_REPO" ]
+          [ "$EDEN_MOLTENVK_EXPECTED_VERSION" = "$MOLTENVK_VERSION" ]
+          [ "$EDEN_MOLTENVK_EXPECTED_ASSET" = "$MOLTENVK_ASSET" ]
+          APP="${{ steps.product.outputs.app }}"
+          ./ci/fetch-moltenvk.sh --verify-embedded "$APP"
+
+      # Four IPAs from one .app. cemu-ios-muffin's workflow does the same
       # (".github/workflows/build-ios-app.yml": Package ad-hoc signed IPA), and the
       # reason to prefer this over three Xcode targets is that the variants differ ONLY
       # in their entitlements - three targets would mean linking ~60 archives three times.
@@ -264,6 +281,14 @@ jobs:
             mkdir -p "$GITHUB_WORKSPACE/stage-$VARIANT/Payload"
             cp -R "$APP" "$GITHUB_WORKSPACE/stage-$VARIANT/Payload/"
             STAGED="$GITHUB_WORKSPACE/stage-$VARIANT/Payload/$APP_NAME.app"
+
+            staged_mvk="$STAGED/Frameworks/libMoltenVK.dylib"
+            [ -f "$staged_mvk" ] || { echo "::error::MoltenVK missing before packaging"; exit 1; }
+            prepared_sha="$(shasum -a 256 "$staged_mvk" | awk '{print $1}')"
+            [ "$prepared_sha" = "$EDEN_MOLTENVK_EXPECTED_SHA256" ] || {
+              echo "::error::packaging input MoltenVK differs from the verified v$EDEN_MOLTENVK_EXPECTED_VERSION artifact"
+              exit 1
+            }
 
             if [ -n "$ENTS" ]; then
               # NESTED CODE FIRST. codesign does not sign nested code automatically, and
@@ -289,6 +314,9 @@ jobs:
               codesign -d --entitlements :- --xml "$STAGED" 2>/dev/null | head -40 || true
             fi
 
+            signed_mvk_sha="$(shasum -a 256 "$staged_mvk" | awk '{print $1}')"
+            printf '%s\n' "$signed_mvk_sha" > "$GITHUB_WORKSPACE/moltenvk-$VARIANT.sha256"
+
             ( cd "$GITHUB_WORKSPACE/stage-$VARIANT" && zip -qry "$OUT" Payload )
             echo "packed $OUT ($(du -h "$OUT" | cut -f1))"
           }
@@ -305,10 +333,20 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x ci/verify-ipa.sh
-          ./ci/verify-ipa.sh "$APP_NAME-unsigned.ipa"
-          ./ci/verify-ipa.sh "$APP_NAME-sideload.ipa"   src/ios/Eden.entitlements
-          ./ci/verify-ipa.sh "$APP_NAME-trollstore.ipa" src/ios/Eden-TrollStore.entitlements
-          ./ci/verify-ipa.sh "$APP_NAME-debug.ipa"      src/ios/Eden-Debug.entitlements
+          verify() {
+            VARIANT="$1"
+            IPA="$APP_NAME-$VARIANT.ipa"
+            ENTS="${2:-}"
+            ./ci/verify-ipa.sh "$IPA" "$ENTS" \
+              "$EDEN_MOLTENVK_EXPECTED_REPO" \
+              "$EDEN_MOLTENVK_EXPECTED_VERSION" \
+              "$EDEN_MOLTENVK_EXPECTED_ASSET" \
+              "$(cat "$GITHUB_WORKSPACE/moltenvk-$VARIANT.sha256")"
+          }
+          verify unsigned
+          verify sideload src/ios/Eden.entitlements
+          verify trollstore src/ios/Eden-TrollStore.entitlements
+          verify debug src/ios/Eden-Debug.entitlements
 
       - name: Upload IPAs
         uses: actions/upload-artifact@v4
@@ -339,6 +377,8 @@ jobs:
             echo "## iOS app build (M2)"
             echo ""
             echo "Target: \`iphoneos\` arm64, deployment target 15.0, iPhone + iPad."
+            echo "MoltenVK: \`$EDEN_MOLTENVK_EXPECTED_REPO@$EDEN_MOLTENVK_EXPECTED_VERSION\` ($EDEN_MOLTENVK_EXPECTED_ASSET), SHA-256 \`$EDEN_MOLTENVK_EXPECTED_SHA256\`."
+            echo "MoltenVK source archive SHA-256: \`$EDEN_MOLTENVK_ARCHIVE_SHA256\`."
             echo ""
             if [ -f src/ios/link-flags.txt ]; then
               echo "Linked **$(grep -c '\.a$' src/ios/link-flags.txt || echo 0)** static archives."
