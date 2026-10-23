@@ -137,6 +137,9 @@ void eden_bridge_set_visible(bool visible);
  */
 bool eden_bridge_start(const char *rom_path, const char *data_root);
 
+/** Select the iOS CPU mode for the next session. Must be called before start. */
+void eden_bridge_set_multi_core_enabled(bool enabled);
+
 /**
  * Ask the emulation thread to leave the run loop, then join it.
  * MAIN THREAD. Blocks until retro_deinit has returned, or until the timeout.

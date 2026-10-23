@@ -167,13 +167,28 @@ PresentManager::PresentManager(const vk::Instance& instance_,
     }
 }
 
-PresentManager::~PresentManager() = default;
+PresentManager::~PresentManager() {
+    if (present_thread.joinable()) {
+        present_thread.request_stop();
+        frame_cv.notify_all();
+        present_thread.join();
+
+        scheduler.WaitWorker();
+        std::scoped_lock submit_lock{scheduler.submit_mutex};
+        if (device.GetLogical().WaitIdle() == VK_ERROR_DEVICE_LOST) {
+            device.ReportLoss();
+        }
+    }
+}
 
 Frame* PresentManager::GetRenderFrame() {
 
     // Wait for free presentation frames
     std::unique_lock lock{free_mutex};
-    free_cv.wait(lock, [this] { return !free_queue.empty(); });
+    free_cv.wait(lock, [this] { return present_failed.load() || !free_queue.empty(); });
+    if (present_exception) {
+        std::rethrow_exception(present_exception);
+    }
 
     // Take the frame from the queue
     Frame* frame = free_queue.front();
@@ -187,6 +202,12 @@ Frame* PresentManager::GetRenderFrame() {
 }
 
 void PresentManager::Present(Frame* frame) {
+    if (present_failed.load()) {
+        std::scoped_lock lock{free_mutex};
+        if (present_exception) {
+            std::rethrow_exception(present_exception);
+        }
+    }
     if (use_present_thread) {
         scheduler.Record([this, frame](vk::CommandBuffer) {
             std::unique_lock lock{queue_mutex};
@@ -325,6 +346,10 @@ void PresentManager::WaitPresent() {
     // To ensure that frame has been presented as well take hold of the swapchain
     // mutex.
     std::scoped_lock swapchain_lock{swapchain_mutex};
+    std::scoped_lock free_lock{free_mutex};
+    if (present_exception) {
+        std::rethrow_exception(present_exception);
+    }
 }
 
 void PresentManager::PresentThread(std::stop_token token) {
@@ -345,7 +370,25 @@ void PresentManager::PresentThread(std::stop_token token) {
             // before the queue lock goes out of scope. This way the swapchain
             // lock in WaitPresent is guaranteed to occur after here.
             void(std::exchange(lock, std::unique_lock{swapchain_mutex}));
-            CopyToSwapchain(frame);
+            if (!present_failed.load()) {
+                try {
+                    CopyToSwapchain(frame);
+                } catch (...) {
+                    scheduler.WaitWorker();
+                    {
+                        std::scoped_lock submit_lock{scheduler.submit_mutex};
+                        if (device.GetLogical().WaitIdle() == VK_ERROR_DEVICE_LOST) {
+                            device.ReportLoss();
+                        }
+                    }
+                    std::scoped_lock failure_lock{free_mutex};
+                    if (!present_exception) {
+                        present_exception = std::current_exception();
+                    }
+                    present_failed.store(true);
+                    free_cv.notify_all();
+                }
+            }
 
             // Free the frame for reuse
             std::scoped_lock fl{free_mutex};
@@ -434,7 +477,11 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         RecreateSwapchain(frame);
     }
 
+    u32 acquire_attempt = 0;
     while (swapchain.AcquireNextImage()) {
+        if (++acquire_attempt >= MAX_PRESENT_ATTEMPTS) {
+            throw vk::Exception(VK_ERROR_OUT_OF_DATE_KHR);
+        }
         RecreateSwapchain(frame);
     }
 

@@ -113,6 +113,7 @@ void AddressSpace::InvalidateBasicBlocks(const ::Common::unordered_set<IR::Locat
 }
 
 void AddressSpace::ClearCache() {
+    ClearCacheMetadata();
     block_entries.clear();
     reverse_block_entries.clear();
     block_infos.clear();

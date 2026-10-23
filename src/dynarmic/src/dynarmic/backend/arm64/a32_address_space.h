@@ -30,6 +30,7 @@ protected:
     void EmitPrelude();
     EmitConfig GetEmitConfig() override;
     void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) override;
+    void ClearCacheMetadata() override { block_ranges.ClearCache(); }
 
     const A32::UserConfig conf;
     BlockRangeInformation<u32> block_ranges;

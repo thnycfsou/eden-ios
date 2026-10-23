@@ -89,6 +89,7 @@ static struct {
     // --- core options, learned from RETRO_ENVIRONMENT_SET_VARIABLES -------
     EdenOption options[EDEN_MAX_OPTIONS];
     int option_count;
+    _Atomic int multi_core_override;
 
     // --- stats ------------------------------------------------------------
     _Atomic unsigned long long iterations;
@@ -132,6 +133,7 @@ static void EdenBridgeInitOnce(void) {
         pthread_cond_init(&g.gate_cond, NULL);
         atomic_store(&g.state, EdenBridgeStateIdle);
         atomic_store(&g.visible, true);
+        atomic_store(&g.multi_core_override, -1);
         strlcpy(g.status, "idle", sizeof(g.status));
     });
 }
@@ -218,6 +220,13 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
         struct retro_variable *var = (struct retro_variable *)data;
         if (var == NULL) {
             return false;
+        }
+        if (var->key != NULL && strcmp(var->key, "eden_multi_core") == 0) {
+            const int override = atomic_load(&g.multi_core_override);
+            if (override >= 0) {
+                var->value = override ? "Enabled" : "Disabled";
+                return true;
+            }
         }
         var->value = EdenLookupOption(var->key);
         // Returning false makes the core fall back to the default it passed to
@@ -309,6 +318,11 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
     default:
         return false;
     }
+}
+
+void eden_bridge_set_multi_core_enabled(bool enabled) {
+    EdenBridgeInitOnce();
+    atomic_store(&g.multi_core_override, enabled ? 1 : 0);
 }
 
 static void EdenVideoRefreshCB(const void *data, unsigned width, unsigned height, size_t pitch) {

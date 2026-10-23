@@ -165,9 +165,13 @@ void Swapchain::Create(
 }
 
 bool Swapchain::AcquireNextImage() {
+    if (image_count == 0 || present_semaphores.empty()) {
+        throw vk::Exception(VK_ERROR_OUT_OF_DATE_KHR);
+    }
+    u32 acquired_image_index{};
     const VkResult result = device.GetLogical().AcquireNextImageKHR(
         *swapchain, (std::numeric_limits<u64>::max)(), *present_semaphores[frame_index],
-        VK_NULL_HANDLE, &image_index);
+        VK_NULL_HANDLE, &acquired_image_index);
     switch (result) {
     case VK_SUCCESS:
         break;
@@ -176,14 +180,23 @@ bool Swapchain::AcquireNextImage() {
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
-        break;
+        return true;
     case VK_ERROR_SURFACE_LOST_KHR:
         vk::Check(result);
         break;
+    case VK_ERROR_DEVICE_LOST:
+        device.ReportLoss();
+        [[fallthrough]];
     default:
-        LOG_ERROR(Render_Vulkan, "vkAcquireNextImageKHR returned {}", string_VkResult(result));
-        break;
+        vk::Check(result);
     }
+
+    if (acquired_image_index >= image_count) {
+        LOG_ERROR(Render_Vulkan, "vkAcquireNextImageKHR returned invalid image index {} (count {})",
+                  acquired_image_index, image_count);
+        throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
+    image_index = acquired_image_index;
 
     const auto wait_with_frame_pacing = [this] {
     switch (Settings::values.frame_pacing_mode.GetValue()) {
@@ -217,7 +230,9 @@ bool Swapchain::AcquireNextImage() {
 
     resource_ticks[image_index] = scheduler.CurrentTick();
 
-    return is_suboptimal || is_outdated;
+    // A suboptimal acquire still owns a valid image; its semaphore must be
+    // consumed by copy/present. Recreate at the next frame boundary.
+    return false;
 }
 
 void Swapchain::Present(VkSemaphore render_semaphore) {
@@ -241,13 +256,16 @@ void Swapchain::Present(VkSemaphore render_semaphore) {
         break;
     case VK_ERROR_OUT_OF_DATE_KHR:
         is_outdated = true;
-        break;
+        return;
     case VK_ERROR_SURFACE_LOST_KHR:
         vk::Check(result);
         break;
+    case VK_ERROR_DEVICE_LOST:
+        device.ReportLoss();
+        [[fallthrough]];
     default:
         LOG_CRITICAL(Render_Vulkan, "Failed to present with error {}", string_VkResult(result));
-        break;
+        vk::Check(result);
     }
     ++frame_index;
     if (frame_index >= image_count) {

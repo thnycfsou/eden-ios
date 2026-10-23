@@ -8,6 +8,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <exception>
 #include <mutex>
 #include <boost/container/deque.hpp>
 
@@ -106,6 +107,8 @@ private:
     bool blit_supported;
     bool storage_supported;
     bool use_present_thread;
+    std::exception_ptr present_exception;
+    std::atomic<bool> present_failed{};
     std::atomic<std::size_t> image_count{};
     std::atomic<std::size_t> swapchain_image_count{};
     std::atomic<VkFormat> swapchain_image_format{};

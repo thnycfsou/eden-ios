@@ -30,6 +30,9 @@
 #if defined(__linux__ ) && defined(ARCHITECTURE_arm64)
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 namespace Settings {
 
@@ -179,6 +182,12 @@ bool IsGPUFenceBehaviorAccurate() {
 }
 
 bool IsFastmemEnabled() {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // The fastmem arena maps guest 4 KiB pages directly onto host memory. iOS
+    // uses 16 KiB host pages, so this mapping cannot safely represent the guest
+    // page table, regardless of the selected CPU accuracy or per-option value.
+    return false;
+#else
     if (values.cpu_accuracy.GetValue() == Settings::CpuAccuracy::Debugging)
         return bool(values.cpuopt_fastmem);
     else if (values.cpu_accuracy.GetValue() == CpuAccuracy::Unsafe)
@@ -191,6 +200,7 @@ bool IsFastmemEnabled() {
     return false;
 #else
     return true;
+#endif
 #endif
 }
 

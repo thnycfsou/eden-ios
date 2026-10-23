@@ -58,6 +58,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <time.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <unistd.h>
 
 #ifdef __APPLE__
@@ -233,11 +236,8 @@ const char* ReadStringOption(const char* key) {
 // ReinitializeIfNecessary (core.cpp:314-332) only keys off multicore and memory
 // layout, so async GPU in particular is latch-once.
 void ApplyPreInitSettings() {
-    // TODO(cpu): start single-core until dynarmic's Apple W^X handling is confirmed
-    // safe for a shared code cache across Hardware::NUM_CPU_CORES guest threads.
-    // pthread_jit_write_protect_np is thread-local, and CpuManager::SetMulticore is
-    // only called inside System::Initialize (core.cpp:141), so this cannot be
-    // revisited after the fact.
+    // iOS declares Disabled as the first libretro alternative. The frontend's
+    // existing GET_VARIABLE callback can still select Enabled before Initialize.
     Settings::values.use_multi_core.SetValue(ReadBoolOption("eden_multi_core", true));
     Settings::values.use_asynchronous_gpu_emulation.SetValue(
         ReadBoolOption("eden_async_gpu", true));
@@ -471,7 +471,11 @@ RETRO_API void retro_set_environment(retro_environment_t cb) {
     static const struct retro_variable vars[] = {
         {"eden_resolution", "Internal Resolution; 1x|0.25x|0.5x|0.75x|2x"},
         {"eden_use_docked", "Docked Mode; No|Yes"},
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        {"eden_multi_core", "Multicore CPU; Disabled|Enabled"},
+#else
         {"eden_multi_core", "Multicore CPU; Enabled|Disabled"},
+#endif
         {"eden_async_gpu", "Asynchronous GPU Emulation; Enabled|Disabled"},
         {"eden_memory_layout", "Emulated Memory; 4GB|6GB|8GB"},
         {"eden_speed_limit", "Internal Frame Limiter; Enabled|Disabled"},

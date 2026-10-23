@@ -10,6 +10,7 @@
 
 #include <boost/icl/interval_map.hpp>
 #include <boost/icl/interval_set.hpp>
+#include <utility>
 #include "common/common_types.h"
 #include "common/container/unordered_set.h"
 
@@ -34,7 +35,20 @@ template<typename P>
             for (const auto& descriptor : it->second)
                 erase_locations.insert(descriptor);
     }
-    // TODO: EFFICIENCY: Remove ranges that are to be erased.
+
+    if (!erase_locations.empty()) {
+        decltype(block_ranges) remaining_ranges;
+        for (const auto& [range, descriptors] : block_ranges) {
+            auto remaining_descriptors = descriptors;
+            for (const auto& descriptor : erase_locations) {
+                remaining_descriptors.erase(descriptor);
+            }
+            if (!remaining_descriptors.empty()) {
+                remaining_ranges.add(std::make_pair(range, std::move(remaining_descriptors)));
+            }
+        }
+        block_ranges = std::move(remaining_ranges);
+    }
     return erase_locations;
 }
 
