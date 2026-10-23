@@ -176,6 +176,7 @@ jobs:
       - name: Fetch MoltenVK (iphoneos arm64)
         env:
           EDEN_MOLTENVK_REQUIRED: "1"
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -o pipefail
           ./ci/fetch-moltenvk.sh 2>&1 | tee moltenvk.log
