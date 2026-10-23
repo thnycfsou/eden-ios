@@ -860,6 +860,8 @@ void KernelCore::Initialize() {
 }
 
 void KernelCore::Shutdown() {
+    // Keep shutdown safe when a caller reaches it without first running ShutdownCores().
+    impl->TerminateAllProcesses();
     impl->Shutdown(*this);
 }
 
@@ -1254,8 +1256,11 @@ void KernelCore::SuspendEmulation(bool suspended) {
     }
 }
 
-void KernelCore::ShutdownCores() {
+void KernelCore::ShutdownCores(bool run_shutdown_threads) {
     impl->TerminateAllProcesses();
+    if (!run_shutdown_threads) {
+        return;
+    }
     KScopedSchedulerLock lk{*this};
     for (auto* thread : impl->shutdown_threads)
         void(thread->Run(*this));

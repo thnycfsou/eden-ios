@@ -10,6 +10,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <fmt/ranges.h>
@@ -107,6 +108,17 @@ std::string BuildCommaSeparatedExtensions(
     return fmt::format("{}", fmt::join(available_extensions, ","));
 }
 
+template <typename Factory>
+auto InitializeRendererStage(std::string_view stage, Factory&& factory) -> decltype(factory()) {
+    try {
+        return factory();
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "Renderer initialization stage '{}' failed: {}", stage,
+                  exception.what());
+        throw;
+    }
+}
+
 } // Anonymous namespace
 
 Device CreateDevice(const vk::Instance& instance, const vk::InstanceDispatch& dld, VkSurfaceKHR surface) {
@@ -128,54 +140,58 @@ try
     : RendererBase(emu_window, std::move(context_))
     , device_memory(device_memory_)
     , gpu(gpu_)
-    , library(OpenLibrary(context.get()))
+    , library(InitializeRendererStage("Vulkan library", [&] { return OpenLibrary(context.get()); }))
     , dld()
     // Create raw Vulkan instance first
-    , instance(CreateInstance(*library,
-                            dld,
-                            VK_API_VERSION_1_1,
-                            render_window.GetWindowInfo().type,
-                            Settings::values.renderer_debug.GetValue()))
+    , instance(InitializeRendererStage("instance", [&] {
+        return CreateInstance(*library, dld, VK_API_VERSION_1_1,
+                              render_window.GetWindowInfo().type,
+                              Settings::values.renderer_debug.GetValue());
+    }))
     // Create debug messenger if debug is enabled
-    , debug_messenger(Settings::values.renderer_debug ? CreateDebugUtilsCallback(instance)
-                                                    : vk::DebugUtilsMessenger{})
+    , debug_messenger(InitializeRendererStage("debug messenger", [&] {
+        return Settings::values.renderer_debug ? CreateDebugUtilsCallback(instance)
+                                               : vk::DebugUtilsMessenger{};
+    }))
     // Create surface
-    , surface(CreateSurface(instance, render_window.GetWindowInfo()))
-    , device(CreateDevice(instance, dld, *surface))
-    , memory_allocator(device)
+    , surface(InitializeRendererStage("surface", [&] {
+        return CreateSurface(instance, render_window.GetWindowInfo());
+    }))
+    , device(InitializeRendererStage("logical device", [&] {
+        return CreateDevice(instance, dld, *surface);
+    }))
+    , memory_allocator(InitializeRendererStage("memory allocator", [&] {
+        return MemoryAllocator(device);
+    }))
     , state_tracker()
-    , scheduler(device, state_tracker)
-    , swapchain(*surface,
-                device,
-                scheduler,
-               render_window.GetFramebufferLayout().width,
-               render_window.GetFramebufferLayout().height)
-    , present_manager(instance,
-                      render_window,
-                      device,
-                      memory_allocator,
-                      scheduler,
-                      swapchain,
-                      surface)
-    , blit_swapchain(device_memory,
-                   device,
-                   memory_allocator,
-                   present_manager,
-                   scheduler,
-                   PresentFiltersForDisplay)
-    , blit_capture(device_memory,
-                   device,
-                   memory_allocator,
-                   present_manager,
-                   scheduler,
-                   PresentFiltersForDisplay)
-    , blit_applet(device_memory,
-                  device,
-                  memory_allocator,
-                  present_manager,
-                  scheduler,
-                  PresentFiltersForAppletCapture)
-    , rasterizer(render_window, gpu, device_memory, device, memory_allocator, state_tracker, scheduler)
+    , scheduler(InitializeRendererStage("scheduler", [&] {
+        return Scheduler(device, state_tracker);
+    }))
+    , swapchain(InitializeRendererStage("swapchain", [&] {
+        return Swapchain(*surface, device, scheduler,
+                         render_window.GetFramebufferLayout().width,
+                         render_window.GetFramebufferLayout().height);
+    }))
+    , present_manager(InitializeRendererStage("present manager", [&] {
+        return PresentManager(instance, render_window, device, memory_allocator, scheduler,
+                              swapchain, surface);
+    }))
+    , blit_swapchain(InitializeRendererStage("display blitter", [&] {
+        return BlitScreen(device_memory, device, memory_allocator, present_manager, scheduler,
+                          PresentFiltersForDisplay);
+    }))
+    , blit_capture(InitializeRendererStage("capture blitter", [&] {
+        return BlitScreen(device_memory, device, memory_allocator, present_manager, scheduler,
+                          PresentFiltersForDisplay);
+    }))
+    , blit_applet(InitializeRendererStage("applet blitter", [&] {
+        return BlitScreen(device_memory, device, memory_allocator, present_manager, scheduler,
+                          PresentFiltersForAppletCapture);
+    }))
+    , rasterizer(InitializeRendererStage("rasterizer", [&] {
+        return RasterizerVulkan(render_window, gpu, device_memory, device, memory_allocator,
+                               state_tracker, scheduler);
+    }))
 #ifdef HAS_LSFG
     , frame_gen(memory_allocator, scheduler)
 #endif

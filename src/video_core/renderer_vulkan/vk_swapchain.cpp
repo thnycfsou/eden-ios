@@ -104,15 +104,21 @@ VkExtent2D ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capabilities, u32 wi
 }
 
 VkCompositeAlphaFlagBitsKHR ChooseAlphaFlags(const VkSurfaceCapabilitiesKHR& capabilities) {
-    if (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR) {
-        return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    } else if (capabilities.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) {
-        return VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
-    } else {
-        LOG_ERROR(Render_Vulkan, "Unknown composite alpha flags value {:#x}",
-                  capabilities.supportedCompositeAlpha);
-        return VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    constexpr std::array alpha_modes{
+        VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR,
+        VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+        VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+    };
+    for (const auto alpha_mode : alpha_modes) {
+        if (capabilities.supportedCompositeAlpha & alpha_mode) {
+            return alpha_mode;
+        }
     }
+
+    LOG_ERROR(Render_Vulkan, "Surface reports no supported composite alpha mode (flags={:#x})",
+              capabilities.supportedCompositeAlpha);
+    throw vk::Exception(VK_ERROR_FORMAT_NOT_SUPPORTED);
 }
 
 } // Anonymous namespace
@@ -254,6 +260,27 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     const auto formats{physical_device.GetSurfaceFormatsKHR(VkSurfaceKHR(surface))};
     const auto present_modes = physical_device.GetSurfacePresentModesKHR(VkSurfaceKHR(surface));
 
+    if (formats.empty()) {
+        LOG_ERROR(Render_Vulkan, "Surface returned no swapchain formats");
+        throw vk::Exception(VK_ERROR_FORMAT_NOT_SUPPORTED);
+    }
+    if (present_modes.empty()) {
+        LOG_ERROR(Render_Vulkan, "Surface returned no presentation modes");
+        throw vk::Exception(VK_ERROR_INITIALIZATION_FAILED);
+    }
+
+    constexpr VkImageUsageFlags required_usage =
+        VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    const VkImageUsageFlags unsupported_usage =
+        required_usage & ~capabilities.supportedUsageFlags;
+    if (unsupported_usage != 0) {
+        LOG_ERROR(Render_Vulkan,
+                  "Surface cannot support Eden swapchain image usage "
+                  "(required={:#x}, supported={:#x}, missing={:#x})",
+                  required_usage, capabilities.supportedUsageFlags, unsupported_usage);
+        throw vk::Exception(VK_ERROR_FORMAT_NOT_SUPPORTED);
+    }
+
     has_mailbox = std::find(present_modes.begin(), present_modes.end(), VK_PRESENT_MODE_MAILBOX_KHR)
                   != present_modes.end();
     has_imm = std::find(present_modes.begin(), present_modes.end(),
@@ -287,7 +314,7 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
         .imageColorSpace = surface_format.colorSpace,
         .imageExtent = {},
         .imageArrayLayers = 1,
-        .imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+        .imageUsage = required_usage,
         .imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
         .queueFamilyIndexCount = 0,
         .pQueueFamilyIndices = nullptr,
@@ -312,22 +339,30 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
     }
     // According to Vulkan spec, when using VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR,
     // the base format (imageFormat) MUST be included in pViewFormats
-    const std::array view_formats{
-        swapchain_ci.imageFormat,  // Base format MUST be first
-        VK_FORMAT_B8G8R8A8_UNORM,
-        VK_FORMAT_B8G8R8A8_SRGB,
-#ifdef __ANDROID__
-        VK_FORMAT_R8G8B8A8_UNORM,  // Android may use RGBA
-        VK_FORMAT_R8G8B8A8_SRGB,
-#endif
-    };
+    std::vector<VkFormat> view_formats{swapchain_ci.imageFormat};
+    switch (swapchain_ci.imageFormat) {
+    case VK_FORMAT_B8G8R8A8_UNORM:
+        view_formats.push_back(VK_FORMAT_B8G8R8A8_SRGB);
+        break;
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        view_formats.push_back(VK_FORMAT_B8G8R8A8_UNORM);
+        break;
+    case VK_FORMAT_R8G8B8A8_UNORM:
+        view_formats.push_back(VK_FORMAT_R8G8B8A8_SRGB);
+        break;
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        view_formats.push_back(VK_FORMAT_R8G8B8A8_UNORM);
+        break;
+    default:
+        break;
+    }
     VkImageFormatListCreateInfo format_list{
-        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR,
+        .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
         .pNext = nullptr,
         .viewFormatCount = static_cast<u32>(view_formats.size()),
         .pViewFormats = view_formats.data(),
     };
-    if (device.IsKhrSwapchainMutableFormatEnabled()) {
+    if (device.IsKhrSwapchainMutableFormatEnabled() && view_formats.size() > 1) {
         format_list.pNext = std::exchange(swapchain_ci.pNext, &format_list);
         swapchain_ci.flags |= VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR;
     }
@@ -341,12 +376,17 @@ void Swapchain::CreateSwapchain(const VkSurfaceCapabilitiesKHR& capabilities) {
 
     images = swapchain.GetImages();
     image_count = static_cast<u32>(images.size());
-#ifdef __ANDROID__
-    // Android is already ordered the same as Switch.
-    image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
-#else
-    image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
-#endif
+    switch (surface_format.format) {
+    case VK_FORMAT_B8G8R8A8_SRGB:
+        image_view_format = VK_FORMAT_B8G8R8A8_UNORM;
+        break;
+    case VK_FORMAT_R8G8B8A8_SRGB:
+        image_view_format = VK_FORMAT_R8G8B8A8_UNORM;
+        break;
+    default:
+        image_view_format = surface_format.format;
+        break;
+    }
 }
 
 void Swapchain::CreateSemaphores() {

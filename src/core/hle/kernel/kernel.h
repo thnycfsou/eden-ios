@@ -271,7 +271,7 @@ public:
     void ExceptionalExitApplication();
 
     /// Notify emulated CPU cores to shut down.
-    void ShutdownCores();
+    void ShutdownCores(bool run_shutdown_threads = true);
 
     bool IsMulticore() const;
 

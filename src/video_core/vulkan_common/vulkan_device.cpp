@@ -27,6 +27,7 @@
 #include "common/settings_enums.h"
 #include "video_core/vulkan_common/nsight_aftermath_tracker.h"
 #include "video_core/vulkan_common/vma.h"
+#include "video_core/vulkan_common/vk_enum_string_helper.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 #include "video_core/gpu_logging/gpu_logging.h"
@@ -764,13 +765,24 @@ Device::Device(VkInstance instance_, vk::PhysicalDevice physical_, VkSurfaceKHR 
             .pTypeExternalMemoryHandleTypes = nullptr,
     };
 
-    vk::Check(vmaCreateAllocator(&allocator_info, &allocator));
+    const VkResult allocator_result = vmaCreateAllocator(&allocator_info, &allocator);
+    if (allocator_result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan, "vmaCreateAllocator failed with {}",
+                  string_VkResult(allocator_result));
+    }
+    vk::Check(allocator_result);
 
-    owns_static_pipeline_cache = surface != VkSurfaceKHR{};
-    LoadStaticPipelineCache();
+    try {
+        owns_static_pipeline_cache = surface != VkSurfaceKHR{};
+        LoadStaticPipelineCache();
 
-    // Initialize GPU logging if enabled
-    InitializeGPULogging();
+        // Initialize GPU logging if enabled
+        InitializeGPULogging();
+    } catch (...) {
+        vmaDestroyAllocator(allocator);
+        allocator = VK_NULL_HANDLE;
+        throw;
+    }
 }
 
 Device::~Device() {
@@ -826,7 +838,18 @@ void Device::LoadStaticPipelineCache() {
         create(0, nullptr);
         return;
     }
-    create(data.size(), data.empty() ? nullptr : data.data());
+    try {
+        create(data.size(), data.empty() ? nullptr : data.data());
+    } catch (const vk::Exception& exception) {
+        if (data.empty()) {
+            throw;
+        }
+        LOG_WARNING(Render_Vulkan,
+                    "Persisted Vulkan pipeline cache was rejected with {}; "
+                    "retrying with an empty cache",
+                    exception.what());
+        create(0, nullptr);
+    }
 }
 
 void Device::SaveStaticPipelineCache() const {

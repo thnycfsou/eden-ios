@@ -58,6 +58,10 @@ public:
     void Initialize();
     void Shutdown();
 
+    [[nodiscard]] bool IsInitialized() const {
+        return gpu_barrier.has_value();
+    }
+
     std::function<void()> GetGuestActivateFunc(Kernel::KernelCore& kernel) {
         return [this, &kernel] { GuestActivate(kernel); };
     }

@@ -26,10 +26,16 @@ CpuManager::~CpuManager() = default;
 void CpuManager::Initialize() {
     num_cores = is_multicore ? Core::Hardware::NUM_CPU_CORES : 1;
     gpu_barrier.emplace(num_cores + 1);
-    for (std::size_t core = 0; core < num_cores; core++)
-        core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
-            RunThread(token, core);
-        });
+    try {
+        for (std::size_t core = 0; core < num_cores; core++) {
+            core_data[core].host_thread = std::jthread([this, core](std::stop_token token) {
+                RunThread(token, core);
+            });
+        }
+    } catch (...) {
+        Shutdown();
+        throw;
+    }
 }
 
 void CpuManager::Shutdown() {
@@ -39,6 +45,8 @@ void CpuManager::Shutdown() {
             core_data[core].host_thread.join();
         }
     }
+    gpu_barrier.reset();
+    num_cores = 0;
 }
 
 void CpuManager::GuestThreadFunction(Kernel::KernelCore& kernel) {

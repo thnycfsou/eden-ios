@@ -441,15 +441,18 @@ struct System::Impl {
         is_powered_on = false;
         exit_locked = false;
         exit_requested = false;
+        const bool cpu_manager_initialized = cpu_manager.IsInitialized();
         if (gpu_core)
             gpu_core->NotifyShutdown();
 
         stop_event.request_stop();
         core_timing.SyncPause(false);
         Network::CancelPendingSocketOperations();
-        kernel.SuspendEmulation(true);
+        if (cpu_manager_initialized) {
+            kernel.SuspendEmulation(true);
+        }
         kernel.CloseServices();
-        kernel.ShutdownCores();
+        kernel.ShutdownCores(cpu_manager_initialized);
         services.reset();
         service_manager.reset();
         fs_controller.Reset();

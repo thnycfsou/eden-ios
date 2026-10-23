@@ -764,7 +764,12 @@ DescriptorSetLayout Device::CreateDescriptorSetLayout(
 
 PipelineCache Device::CreatePipelineCache(const VkPipelineCacheCreateInfo& ci) const {
     VkPipelineCache cache;
-    Check(dld->vkCreatePipelineCache(handle, &ci, nullptr, &cache));
+    const VkResult result = dld->vkCreatePipelineCache(handle, &ci, nullptr, &cache);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan, "vkCreatePipelineCache failed with {} (initial data: {} bytes)",
+                  string_VkResult(result), ci.initialDataSize);
+    }
+    Check(result);
     return PipelineCache(cache, handle, *dld);
 }
 
@@ -844,7 +849,17 @@ Event Device::CreateEvent() const {
 
 SwapchainKHR Device::CreateSwapchainKHR(const VkSwapchainCreateInfoKHR& ci) const {
     VkSwapchainKHR object;
-    Check(dld->vkCreateSwapchainKHR(handle, &ci, nullptr, &object));
+    const VkResult result = dld->vkCreateSwapchainKHR(handle, &ci, nullptr, &object);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan,
+                  "vkCreateSwapchainKHR failed with {} "
+                  "(format={}, colorSpace={}, extent={}x{}, imageCount={}, usage={:#x}, "
+                  "alpha={:#x}, presentMode={})",
+                  string_VkResult(result), ci.imageFormat, ci.imageColorSpace, ci.imageExtent.width,
+                  ci.imageExtent.height, ci.minImageCount, ci.imageUsage, ci.compositeAlpha,
+                  ci.presentMode);
+    }
+    Check(result);
     return SwapchainKHR(object, handle, *dld);
 }
 
