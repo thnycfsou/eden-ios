@@ -35,6 +35,13 @@ struct ContentView: View {
             }
         }
         .navigationViewStyle(.stack)
+        // Refresh the displayed status after returning from StikDebug, including
+        // when the scene was inactive while universal.js prepared the arena.
+        .onReceive(jit.$status) { _ in
+            if eden_stikjit_arena_ready() {
+                session.jitRefusal = nil
+            }
+        }
         // Full-screen, not a sheet: the CAMetalLayer must not be resized or partly
         // covered while the core is presenting into it.
         .fullScreenCover(isPresented: .constant(session.isRunning || session.phase == .starting)) {
@@ -62,8 +69,8 @@ struct ContentView: View {
             }
         )
         .background(
-            Color.clear.sheet(item: $session.jitRefusal) { status in
-                JITRequiredView(status: status)
+            Color.clear.sheet(item: $session.jitRefusal) { _ in
+                JITRequiredView(status: jit.status)
                     .environmentObject(jit)
             }
         )
