@@ -406,15 +406,25 @@ AUTH=()
 [ -n "${GITHUB_TOKEN:-}" ] && AUTH=(-H "Authorization: Bearer $GITHUB_TOKEN")
 
 RELEASE_JSON="$TMP/release.json"
-if ! curl -sfL ${AUTH[@]+"${AUTH[@]}"} -H 'Accept: application/vnd.github+json' "$API" -o "$RELEASE_JSON"; then
-    die "the GitHub API has no release tagged '$MOLTENVK_VERSION' in $MOLTENVK_REPO.
-    $API returned an error.
-    List the real tags with:
-        gh api repos/$MOLTENVK_REPO/releases --jq '.[].tag_name'
-    If you are rate-limited, set GITHUB_TOKEN."
+if ! curl -sfL --retry 3 --retry-delay 2 ${AUTH[@]+"${AUTH[@]}"} -H 'Accept: application/vnd.github+json' "$API" -o "$RELEASE_JSON"; then
+    # The pinned Ryujinx release and its iOS asset are independently verified.
+    # An API/network/rate-limit failure is NOT proof the release is missing.
+    # Use its exact published asset URL, then run the normal archive/Mach-O checks.
+    if [ "$MOLTENVK_REPO" = "V380-Ori/Ryujinx.MoltenVK" ] &&
+       [ "$MOLTENVK_VERSION" = "v1.4.1-ryujinx" ] &&
+       [ "$ASSET_NAME" = "MoltenVK-ios.tar" ]; then
+        warn "GitHub Releases API unavailable; trying the pinned iOS asset directly."
+        ASSET_URL="https://github.com/V380-Ori/Ryujinx.MoltenVK/releases/download/v1.4.1-ryujinx/MoltenVK-ios.tar"
+        API_FALLBACK=1
+    else
+        die "GitHub Releases API request failed for $MOLTENVK_REPO@$MOLTENVK_VERSION.
+    $API may be unavailable, rate-limited, or the tag may be absent.
+    Check the HTTP status and release before changing versions."
+    fi
 fi
 
 # Deliberately no jq: it is not on a stock macOS runner. python3 is.
+if [ "${API_FALLBACK:-0}" != "1" ]; then
 ASSET_URL="$(python3 - "$RELEASE_JSON" "$ASSET_NAME" <<'PY'
 import json, sys
 with open(sys.argv[1]) as fh:
@@ -444,6 +454,7 @@ PY
     assets with MOLTENVK_VERSION=. Note that several MoltenVK tags (v1.2.11,
     v1.2.11-rc1, v1.2.11-b1, and everything before v1.2.4) carry no assets; for
     1.2.11 the artifacts live on the separate tag 'v1.2.11-artifacts'."
+fi
 fi
 
 say "url     $ASSET_URL"
