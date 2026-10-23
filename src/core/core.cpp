@@ -288,13 +288,19 @@ struct System::Impl {
     }
 
     SystemResultStatus SetupForApplicationProcess(System& system, Frontend::EmuWindow& emu_window) {
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.host1x.begin");
         host1x_core.emplace(system);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.gpu_create.begin");
         VideoCore::CreateGPU(gpu_core, emu_window, system);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.gpu_create.done available={}",
+                    gpu_core != nullptr);
         if (!gpu_core)
             return SystemResultStatus::ErrorVideoCore;
 
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.audio_core.begin");
         audio_core.emplace(system);
 
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.services.begin");
         service_manager = std::make_shared<Service::SM::ServiceManager>(kernel);
         services.emplace(service_manager, system, stop_event.get_token());
 
@@ -307,27 +313,34 @@ struct System::Impl {
         }
 
         LOG_DEBUG(Core, "Initialized OK");
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.setup.complete");
 
         return SystemResultStatus::Success;
     }
 
     SystemResultStatus Load(System& system, Frontend::EmuWindow& emu_window, const std::string& filepath, Service::AM::FrontendAppletParameters& params) {
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.begin path={}", filepath);
         if (params.launch_type == Service::AM::LaunchType::FrontendInitiated) {
             fs_controller.InitTempStorage();
         }
 
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.initialize_kernel.begin");
         InitializeKernel(system);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.initialize_kernel.done");
 
         if (params.applet_type == Service::AM::AppletType::Application) {
             current_application_filepath = filepath;
         }
 
         const auto file = GetGameFileFromPath(virtual_filesystem, filepath);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.content_file_resolved valid={}", file != nullptr);
 
         // Create the application process
         Loader::ResultStatus load_result{};
         std::vector<u8> control;
         auto process = Service::AM::CreateApplicationProcess(control, app_loader, load_result, system, file, params.program_id, params.program_index);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.application_process_created loader_status={}",
+                    static_cast<u32>(load_result));
         if (load_result != Loader::ResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to load ROM (Error {})!", load_result);
             ShutdownMainProcess();
@@ -360,14 +373,19 @@ struct System::Impl {
         kernel.SetApplicationProcess(process->GetHandle());
 
         // Set up the rest of the system.
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.begin");
         SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.done status={}",
+                    static_cast<u32>(init_result));
         if (init_result != SystemResultStatus::Success) {
             LOG_CRITICAL(Core, "Failed to initialize system (Error {})!", int(init_result));
             ShutdownMainProcess();
             return init_result;
         }
         // Waiting for GPU before initializing CPU
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.cpu_manager.initialize.begin");
         cpu_manager.Initialize();
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.cpu_manager.initialize.done");
 
         // Initialize cheat engine
         if (cheat_engine) {
@@ -377,6 +395,7 @@ struct System::Impl {
         // Register with applet manager
         // All threads are started, begin main process execution, now that we're in the clear
         applet_manager.CreateAndInsertByFrontendAppletParameters(std::move(process), params);
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.applet_registered");
 
         if (Settings::values.gamecard_inserted) {
             if (Settings::values.gamecard_current_game) {
@@ -401,6 +420,7 @@ struct System::Impl {
         }
 
         GameSettings::LoadOverrides(program_id, gpu_core->Renderer());
+        LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.settings_overrides_loaded");
         if (auto room_member = Network::GetRoomMember().lock()) {
             Network::GameInfo game_info;
             game_info.name = name;

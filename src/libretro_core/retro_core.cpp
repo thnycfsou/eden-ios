@@ -47,9 +47,19 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <exception>
+#include <fcntl.h>
+#include <limits.h>
 #include <memory>
+#include <pthread.h>
 #include <string>
+#include <sys/stat.h>
+#include <time.h>
+#include <typeinfo>
+#include <unistd.h>
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -100,6 +110,68 @@ std::string g_data_root_override;
 } // namespace LibretroCore
 
 namespace {
+
+// Keep a small crash-surviving trace in the app's data root. This is deliberately
+// independent of Common::Log's buffered backend so an abort during Core::System::Load
+// still leaves the last completed boundary on disk.
+char g_last_load_checkpoint[128] = "no load checkpoint";
+
+void WriteLoadDiagnostic(const char* event, const char* detail) noexcept {
+    if (LibretroCore::g_data_root_override.empty()) {
+        return;
+    }
+    char path[PATH_MAX];
+    const int path_size = std::snprintf(path, sizeof(path), "%s/log/eden-load-diagnostics.log",
+                                        LibretroCore::g_data_root_override.c_str());
+    if (path_size <= 0 || static_cast<std::size_t>(path_size) >= sizeof(path)) {
+        return;
+    }
+
+    struct timespec now {};
+    clock_gettime(CLOCK_REALTIME, &now);
+    std::uint64_t thread_id = 0;
+#if defined(__APPLE__)
+    pthread_threadid_np(nullptr, &thread_id);
+#else
+    thread_id = static_cast<std::uint64_t>(pthread_self());
+#endif
+    char line[768];
+    const int line_size = std::snprintf(
+        line, sizeof(line), "%lld.%09ld tid=%llu event=%s checkpoint=%s detail=%s\n",
+        static_cast<long long>(now.tv_sec), now.tv_nsec,
+        static_cast<unsigned long long>(thread_id),
+        event, g_last_load_checkpoint, detail != nullptr ? detail : "-");
+    if (line_size <= 0 || static_cast<std::size_t>(line_size) >= sizeof(line)) {
+        return;
+    }
+
+    const int fd = open(path, O_WRONLY | O_CREAT | O_APPEND, 0600);
+    if (fd < 0) {
+        return;
+    }
+    std::size_t written = 0;
+    const auto length = static_cast<std::size_t>(line_size);
+    while (written < length) {
+        const ssize_t result = write(fd, line + written, length - written);
+        if (result <= 0) {
+            break;
+        }
+        written += static_cast<std::size_t>(result);
+    }
+    if (written == length) {
+        fsync(fd);
+    }
+    close(fd);
+}
+
+void LoadCheckpoint(const char* checkpoint) noexcept {
+    std::snprintf(g_last_load_checkpoint, sizeof(g_last_load_checkpoint), "%s", checkpoint);
+    WriteLoadDiagnostic("checkpoint", "reached");
+}
+
+void LoadFailure(const char* category, const char* detail) noexcept {
+    WriteLoadDiagnostic(category, detail);
+}
 
 using namespace std::chrono_literals;
 using LibretroCore::g_audio_batch_cb;
@@ -243,6 +315,7 @@ void StopEmulation() {
 }
 
 bool LoadGameInternal(const std::string& path) {
+    LoadCheckpoint("libretro.load_game.setup_user_paths");
     // static_cast, not void(...). `void(Qualified::Name())` is the vexing parse: the
     // compiler reads it as declaring a function named Qualified::Name returning void,
     // which is illegal inside a function body. The void(...) idiom elsewhere in this
@@ -250,6 +323,7 @@ bool LoadGameInternal(const std::string& path) {
     // reading; this one takes none.
     static_cast<void>(LibretroCore::Content::SetupUserPaths());
     LibretroCore::Content::AdoptKeys();
+    LoadCheckpoint("libretro.load_game.keys_adopted");
 
     ApplyPreLoadSettings();
     g_system->ApplySettings(); // core.h:450
@@ -265,7 +339,9 @@ bool LoadGameInternal(const std::string& path) {
     // have run - hence the ordering above.
     g_system->SetContentProvider(std::make_unique<FileSys::ContentProviderUnion>()); // core.h:356
     g_system->SetFilesystem(std::make_shared<FileSys::RealVfsFilesystem>());         // core.h:340
+    LoadCheckpoint("libretro.load_game.filesystem_objects_created");
     g_system->GetFileSystemController().CreateFactories(*g_system->GetFilesystem());
+    LoadCheckpoint("libretro.load_game.filesystem_factories_created");
     g_system->GetUserChannel().clear(); // core.h:426
 
     if (!LibretroCore::Content::KeysPresent()) {
@@ -299,7 +375,9 @@ bool LoadGameInternal(const std::string& path) {
         .previous_program_index = -1,
     };
 
+    LoadCheckpoint("libretro.load_game.enter_core_system_load");
     const Core::SystemResultStatus result = g_system->Load(*g_emu_window, path, params); // core.h:212
+    LoadCheckpoint("libretro.load_game.core_system_load_returned");
     if (result != Core::SystemResultStatus::Success) {
         const auto why = LibretroCore::Content::DescribeLoadFailure(result);
         LOG_CRITICAL(Frontend, "libretro: Core::System::Load failed ({}): {}",
@@ -312,10 +390,12 @@ bool LoadGameInternal(const std::string& path) {
     // suyu omits this; Android gets away without it only because its thread is created
     // by the JVM side.
     g_system->RegisterHostThread(); // core.h:398
+    LoadCheckpoint("libretro.load_game.host_thread_registered");
 
     LibretroCore::Video::OnGameLoaded();
 
     g_system->GPU().Start();                 // video_core/gpu.h:230
+    LoadCheckpoint("libretro.load_game.gpu_started");
     g_system->GetCpuManager().OnGpuReady();  // cpu_manager.h:54 - releases the barrier
                                              // the guest CPU threads are parked on
 
@@ -438,10 +518,11 @@ RETRO_API void retro_init() {
     const bool paths_ok = LibretroCore::Content::SetupUserPaths();
 
     // suyu sets a verbose filter plus log_flush_line = true (retro_core.cpp:176-177).
-    // Synchronous line-flushed logging through os_log costs measurable frame time on a
-    // phone, so default to warnings with flush off.
+    // Keep the warning-level load checkpoints durable while the game is starting.
     Settings::values.log_filter.SetValue("*:Warning");
-    Settings::values.log_flush_line.SetValue(false);
+    // Loads are infrequent and crash forensics matter more than logger buffering.
+    // Turn flushing off again after a successful load.
+    Settings::values.log_flush_line.SetValue(true);
 
     Common::Log::Initialize(); // src/common/logging.h:132
     Common::Log::Start();      // :134
@@ -516,7 +597,46 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     }
     g_game_path = game->path;
     LOG_INFO(Frontend, "libretro: loading {}", g_game_path);
-    return LoadGameInternal(g_game_path);
+    LoadCheckpoint("libretro.retro_load_game.enter");
+    try {
+        const bool loaded = LoadGameInternal(g_game_path);
+        LoadCheckpoint(loaded ? "libretro.retro_load_game.success" :
+                                "libretro.retro_load_game.returned_false");
+        LoadFailure(loaded ? "result" : "failure", loaded ? "success" : "loader returned false");
+        if (loaded) {
+            Settings::values.log_flush_line.SetValue(false);
+        }
+        return loaded;
+    } catch (const std::exception& exception) {
+        LoadFailure("exception.std", exception.what());
+        LoadFailure("exception.type", typeid(exception).name());
+        LOG_CRITICAL(Frontend, "libretro: exception escaped game load at {}: {} ({})",
+                     g_last_load_checkpoint, exception.what(), typeid(exception).name());
+        if (g_system && g_system->IsPoweredOn()) {
+            try {
+                LoadCheckpoint("libretro.exception_cleanup.begin");
+                g_system->ShutdownMainProcess();
+                LoadCheckpoint("libretro.exception_cleanup.done");
+            } catch (...) {
+                LoadFailure("cleanup.exception", "ShutdownMainProcess also threw");
+            }
+        }
+        return false;
+    } catch (...) {
+        LoadFailure("exception.unknown", "non-std exception escaped game load");
+        LOG_CRITICAL(Frontend, "libretro: unknown exception escaped game load at {}",
+                     g_last_load_checkpoint);
+        if (g_system && g_system->IsPoweredOn()) {
+            try {
+                LoadCheckpoint("libretro.exception_cleanup.begin");
+                g_system->ShutdownMainProcess();
+                LoadCheckpoint("libretro.exception_cleanup.done");
+            } catch (...) {
+                LoadFailure("cleanup.exception", "ShutdownMainProcess also threw");
+            }
+        }
+        return false;
+    }
 }
 
 RETRO_API bool retro_load_game_special(unsigned, const struct retro_game_info*, size_t) {
@@ -555,7 +675,9 @@ RETRO_API void retro_reset() {
     }
     const std::string path = g_game_path;
     retro_unload_game();
-    if (!LoadGameInternal(path)) {
+    struct retro_game_info info{};
+    info.path = path.c_str();
+    if (!retro_load_game(&info)) {
         LOG_CRITICAL(Frontend, "libretro: reset failed to reload {}", path);
         if (g_environ_cb != nullptr) {
             g_environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
