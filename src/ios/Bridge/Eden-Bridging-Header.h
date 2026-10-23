@@ -53,6 +53,7 @@
 // The app's own bridge - what Swift is expected to use.
 #import "EdenCoreBridge.h"
 #import "EdenJIT.h"
+#import "EdenStikJIT.h"
 #import "EdenMetalLayerView.h"
 
 // Key/firmware status and install - the firmware setup screen's entire C surface

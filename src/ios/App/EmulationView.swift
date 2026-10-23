@@ -31,6 +31,9 @@ struct EmulationView: View {
         .onTapGesture(count: 2) {
             withAnimation { showOverlay.toggle() }
         }
+        .onAppear {
+            session.emulationSurfaceDidAppear()
+        }
     }
 
     private var hud: some View {

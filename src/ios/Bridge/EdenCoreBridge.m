@@ -29,6 +29,7 @@
 #include "libretro_core/libretro.h"
 
 #import "EdenCoreBridge.h"
+#import "EdenStikJIT.h"
 
 // ---------------------------------------------------------------------------
 // logging
@@ -563,6 +564,11 @@ void eden_bridge_attach_layer(void *metal_layer, unsigned width, unsigned height
     }
 }
 
+bool eden_bridge_has_layer(void) {
+    EdenBridgeInitOnce();
+    return g.layer != NULL;
+}
+
 void eden_bridge_layer_did_resize(unsigned width, unsigned height) {
     EdenBridgeInitOnce();
     if (width == 0 || height == 0) {
@@ -590,6 +596,10 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
 
     if (atomic_load(&g.state) != EdenBridgeStateIdle) {
         EdenSetStatus("a session is already running");
+        return false;
+    }
+    if (!eden_stikjit_arena_ready() || !eden_stikjit_execution_test_passed()) {
+        EdenSetStatus("start refused: StikJIT arena has not passed the ARM64 RX execution test");
         return false;
     }
     if (rom_path == NULL || rom_path[0] == '\0' || data_root == NULL || data_root[0] == '\0') {

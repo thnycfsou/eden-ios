@@ -32,6 +32,8 @@ private:
     std::uint32_t* exec_ = nullptr;
     std::uint32_t* write_ = nullptr;
     std::size_t bytes_ = 0;
+    std::size_t allocation_offset_ = 0;
+    std::size_t allocation_size_ = 0;
 };
 
 } // namespace Dynarmic::Backend::Arm64::StikJIT
@@ -41,4 +43,6 @@ private:
 // universal.js in StikDebug and return to Eden before calling prepare.
 extern "C" bool eden_stikjit_prepare_arena(void);
 extern "C" bool eden_stikjit_arena_ready(void);
+extern "C" bool eden_stikjit_execution_test_passed(void);
+extern "C" bool eden_stikjit_run_execution_test(void);
 extern "C" const char* eden_stikjit_status(void);

@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <optional>
 
@@ -79,6 +80,7 @@ protected:
     const std::size_t code_cache_size;
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     StikJIT::CodeBlock mem;
+    static constexpr std::size_t kStikJITCodeCacheSize = 8u * 1024u * 1024u;
 #else
     oaknut::CodeBlock mem;
 #endif

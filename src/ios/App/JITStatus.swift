@@ -38,16 +38,16 @@ enum JITStatus: Equatable, Identifiable {
     var permitsEmulation: Bool { self != .unavailable }
 
     static func current() -> JITStatus {
-        // Stage 3 iOS backend always requires the RX/RW executable arena.
-        // CS_DEBUGGED, entitlements and successful mmap calls do not prove it exists.
-        // Never start the emulator until the universal.js preparation completes.
-        return eden_stikjit_arena_ready() ? .viaDebugger : .unavailable
+        // A debugger handshake and RX/RW mappings are necessary, but not proof that
+        // ARM64 can execute from the RX alias. Require the real instruction test.
+        return eden_stikjit_arena_ready() && eden_stikjit_execution_test_passed()
+            ? .viaDebugger : .unavailable
     }
 
     var headline: String {
         switch self {
         case .viaEntitlement: return "JIT is available"
-        case .viaDebugger:    return "StikJIT memory prepared (ARM64 not tested)"
+        case .viaDebugger:    return "StikJIT ARM64 execution verified"
         case .unavailable:    return "Eden cannot run without JIT"
         }
     }
@@ -68,9 +68,8 @@ enum JITStatus: Equatable, Identifiable {
 
         case .viaDebugger:
             return """
-            The universal.js breakpoint protocol prepared a 256 MiB executable region
-            and the writable alias. ARM64 execution has NOT yet been verified on this iOS.
-            The next test is launching a homebrew/game; an execution fault remains possible.
+            Eden wrote a two-instruction ARM64 function through the RW alias, invalidated
+            the RX instruction cache, and executed it successfully through the RX alias.
             """
 
         case .unavailable:
@@ -139,6 +138,7 @@ final class JITAvailability: ObservableObject {
     @Published private(set) var status: JITStatus
     @Published private(set) var diagnostics: String
     @Published private(set) var preparingStikJIT = false
+    @Published private(set) var runningStikJITTest = false
 
     init() {
         status = JITStatus.current()
@@ -170,6 +170,18 @@ final class JITAvailability: ObservableObject {
         diagnostics = JITAvailability.readDiagnostics()
     }
 
+    func runStikJITExecutionTest() {
+        guard eden_stikjit_arena_ready(), !runningStikJITTest else { return }
+        runningStikJITTest = true
+        let passed = eden_stikjit_run_execution_test()
+        runningStikJITTest = false
+        status = JITStatus.current()
+        diagnostics = JITAvailability.readDiagnostics()
+        if !passed {
+            diagnostics += "\n\nARM64 RX/RW execution test failed. Emulator start remains blocked."
+        }
+    }
+
     private static func readDiagnostics() -> String {
         var buffer = [CChar](repeating: 0, count: 2048)
         eden_jit_copy_diagnostics(&buffer, buffer.count)
@@ -181,10 +193,17 @@ final class JITAvailability: ObservableObject {
 
 struct JITRequiredView: View {
 
-    let status: JITStatus // Snapshot from presentation; display live jit.status below.
     @EnvironmentObject private var jit: JITAvailability
     @Environment(\.dismiss) private var dismiss
     @State private var showDiagnostics = false
+
+    private var displayedStatus: JITStatus { jit.status }
+    private var displayedDetail: String {
+        if eden_stikjit_arena_ready() && !eden_stikjit_execution_test_passed() {
+            return "StikDebug prepared the RX/RW arena. Run the ARM64 execution test below; game startup stays blocked until it returns the expected value."
+        }
+        return displayedStatus.detail
+    }
 
     var body: some View {
         NavigationView {
@@ -192,18 +211,18 @@ struct JITRequiredView: View {
                 VStack(alignment: .leading, spacing: 20) {
 
                     HStack(spacing: 12) {
-                        Image(systemName: jit.status.symbolName)
+                        Image(systemName: displayedStatus.symbolName)
                             .font(.system(size: 34))
-                            .foregroundColor(jit.status.tint)
-                        Text(jit.status.headline)
+                            .foregroundColor(displayedStatus.tint)
+                        Text(displayedStatus.headline)
                             .font(.title2.weight(.semibold))
                     }
 
-                    Text(jit.status.detail)
+                    Text(displayedDetail)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if let variant = jit.status.recommendedVariant {
+                    if !eden_stikjit_arena_ready(), let variant = displayedStatus.recommendedVariant {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Which build to install")
                                 .font(.subheadline.weight(.semibold))
@@ -217,9 +236,11 @@ struct JITRequiredView: View {
                         .cornerRadius(10)
                     }
 
-                    Text("Experimental: first select universal.js in StikDebug, attach it to Eden, then return here. Without the active script a breakpoint can crash Eden.")
-                        .font(.caption)
-                        .foregroundColor(.orange)
+                    if displayedStatus == .unavailable && !eden_stikjit_arena_ready() {
+                        Text("Experimental: first select universal.js in StikDebug, attach it to Eden, then return here. Without the active script a breakpoint can crash Eden.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
 
                     Button {
                         jit.prepareStikJIT()
@@ -228,6 +249,24 @@ struct JITRequiredView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .disabled(jit.preparingStikJIT || eden_stikjit_arena_ready())
+
+                    if eden_stikjit_arena_ready() && !eden_stikjit_execution_test_passed() {
+                        Text("Arena mapping is ready. Verify native ARM64 execution before launching a game.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+
+                        Text("This runs a tiny return-value stub from the RX arena. If iOS rejects execution, the process may terminate.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+
+                        Button {
+                            jit.runStikJITExecutionTest()
+                        } label: {
+                            Text(jit.runningStikJITTest ? "Testing RX execution..." : "Test ARM64 RX/RW execution")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(jit.runningStikJITTest)
+                    }
 
                     HStack {
                         Button {

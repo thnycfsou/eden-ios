@@ -13,6 +13,7 @@ final class EmulatorSession: ObservableObject {
 
     enum Phase: Equatable {
         case idle
+        case presenting
         case starting
         case running
         case stopping
@@ -42,6 +43,7 @@ final class EmulatorSession: ObservableObject {
     /// dumps and NCA containers long after retro_load_game returned - so releasing the
     /// scope at the end of the launch call would revoke access midway through play.
     private var scopedURL: URL?
+    private var pendingGame: GameEntry?
 
     private var pollTimer: AnyCancellable?
 
@@ -66,10 +68,6 @@ final class EmulatorSession: ObservableObject {
             jitRefusal = jitStatus
             return
         }
-        // Freeze the verdict: no more probe mappings once oaknut may be allocating its
-        // own. See eden_jit_lock_verdict's comment on the single-JIT-region question.
-        eden_jit_lock_verdict()
-
         // Hold the scope BEFORE the bridge is told the path.
         if game.needsSecurityScope {
             guard game.url.startAccessingSecurityScopedResource() else {
@@ -80,9 +78,57 @@ final class EmulatorSession: ObservableObject {
         }
 
         currentGame = game
+        pendingGame = game
+        phase = .presenting
+        status = "Preparing the Metal surface..."
+        jitRefusal = nil
+    }
+
+    /// Called after EmulationView appears. SwiftUI can invoke onAppear before UIKit's
+    /// first non-zero layout, so wait for the bridge's actual layer attachment.
+    func emulationSurfaceDidAppear() {
+        guard case .presenting = phase else { return }
+        Task { @MainActor in
+            for _ in 0..<50 {
+                guard case .presenting = self.phase else { return }
+                let surface = EdenMetalLayerView.shared
+                let size = surface.physicalPixelSize
+                if surface.window != nil && size.width > 0 && size.height > 0 && eden_bridge_has_layer() {
+                    self.startPendingGame()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            guard case .presenting = phase else { return }
+            releaseScope()
+            pendingGame = nil
+            let message = "The emulation view appeared, but its CAMetalLayer was not attached. Close and try again."
+            phase = .failed(message)
+            status = message
+        }
+    }
+
+    private func startPendingGame() {
+        guard case .presenting = phase, let game = pendingGame else { return }
+
+        // The arena must pass an actual RX execution test, not only the debugger
+        // mapping handshake. Recheck at the last boundary before touching the core.
+        let jitStatus = JITStatus.current()
+        guard jitStatus.permitsEmulation else {
+            releaseScope()
+            pendingGame = nil
+            currentGame = nil
+            phase = .idle
+            jitRefusal = jitStatus
+            return
+        }
+        let surface = EdenMetalLayerView.shared
+        guard surface.window != nil, eden_bridge_has_layer() else { return }
+
+        // No more diagnostic mappings after Dynarmic starts allocating code.
+        eden_jit_lock_verdict()
         phase = .starting
         status = "starting"
-        jitRefusal = nil
 
         let started = game.url.path.withCString { rom in
             EdenPaths.dataRootPath.withCString { root in
@@ -92,12 +138,13 @@ final class EmulatorSession: ObservableObject {
 
         guard started else {
             releaseScope()
+            pendingGame = nil
             phase = .failed(readStatus())
             status = readStatus()
-            currentGame = nil
             return
         }
 
+        pendingGame = nil
         UIApplication.shared.isIdleTimerDisabled = true
         beginPolling()
     }
@@ -121,6 +168,7 @@ final class EmulatorSession: ObservableObject {
                 self.phase = .idle
                 self.status = self.readStatus()
                 self.currentGame = nil
+                self.pendingGame = nil
                 self.iterationsPerSecond = 0
                 UIApplication.shared.isIdleTimerDisabled = false
             }

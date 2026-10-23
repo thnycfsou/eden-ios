@@ -26,8 +26,18 @@ namespace Dynarmic::Backend::Arm64 {
 
 AddressSpace::AddressSpace(std::size_t code_cache_size)
     : ir_block{IR::LocationDescriptor{0}}
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // The StikJIT arena is shared by every guest CPU/address space. The core creates
+    // one Dynarmic instance per guest CPU and the default 128 MiB cache consumed the
+    // entire 256 MiB arena after only two instances. Keep 8 MiB per cache so the arena
+    // can hold 32 address spaces (eight four-core guest processes); cache rollover is
+    // already supported by Emit/ClearCache below.
+    , code_cache_size(std::min(code_cache_size, kStikJITCodeCacheSize))
+    , mem(this->code_cache_size)
+#else
     , code_cache_size(code_cache_size)
     , mem(code_cache_size)
+#endif
 #if defined(__APPLE__) && TARGET_OS_IPHONE
     , code(mem.wptr(), mem.xptr())
 #else

@@ -95,6 +95,10 @@ typedef enum {
  */
 void eden_bridge_attach_layer(void *metal_layer, unsigned width, unsigned height);
 
+/// True after the live CAMetalLayer has been attached by EdenMetalLayerView.
+/// MAIN THREAD ONLY.
+bool eden_bridge_has_layer(void);
+
 /**
  * New PHYSICAL pixel size from layoutSubviews / rotation.
  * MAIN THREAD ONLY - eden_libretro.h:39-42 requires it ("MoltenVK touches the layer
