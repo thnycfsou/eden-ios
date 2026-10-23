@@ -181,7 +181,7 @@ final class JITAvailability: ObservableObject {
 
 struct JITRequiredView: View {
 
-    let status: JITStatus
+    let status: JITStatus // Snapshot from presentation; display live jit.status below.
     @EnvironmentObject private var jit: JITAvailability
     @Environment(\.dismiss) private var dismiss
     @State private var showDiagnostics = false
@@ -192,18 +192,18 @@ struct JITRequiredView: View {
                 VStack(alignment: .leading, spacing: 20) {
 
                     HStack(spacing: 12) {
-                        Image(systemName: status.symbolName)
+                        Image(systemName: jit.status.symbolName)
                             .font(.system(size: 34))
-                            .foregroundColor(status.tint)
-                        Text(status.headline)
+                            .foregroundColor(jit.status.tint)
+                        Text(jit.status.headline)
                             .font(.title2.weight(.semibold))
                     }
 
-                    Text(status.detail)
+                    Text(jit.status.detail)
                         .font(.callout)
                         .fixedSize(horizontal: false, vertical: true)
 
-                    if let variant = status.recommendedVariant {
+                    if let variant = jit.status.recommendedVariant {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Which build to install")
                                 .font(.subheadline.weight(.semibold))
