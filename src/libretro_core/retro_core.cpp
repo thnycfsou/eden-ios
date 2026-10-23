@@ -58,7 +58,6 @@
 #include <string>
 #include <sys/stat.h>
 #include <time.h>
-#include <typeinfo>
 #include <unistd.h>
 
 #ifdef __APPLE__
@@ -609,9 +608,8 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         return loaded;
     } catch (const std::exception& exception) {
         LoadFailure("exception.std", exception.what());
-        LoadFailure("exception.type", typeid(exception).name());
-        LOG_CRITICAL(Frontend, "libretro: exception escaped game load at {}: {} ({})",
-                     g_last_load_checkpoint, exception.what(), typeid(exception).name());
+        LOG_CRITICAL(Frontend, "libretro: exception escaped game load at {}: {}",
+                     g_last_load_checkpoint, exception.what());
         if (g_system && g_system->IsPoweredOn()) {
             try {
                 LoadCheckpoint("libretro.exception_cleanup.begin");
