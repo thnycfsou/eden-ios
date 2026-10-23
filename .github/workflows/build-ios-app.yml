@@ -174,8 +174,10 @@ jobs:
       # MoltenVK does not stop the app from building. It stops it from rendering on a
       # device, which verify-ipa.sh reports as a warning.
       - name: Fetch MoltenVK (iphoneos arm64)
-        continue-on-error: true
+        env:
+          EDEN_MOLTENVK_REQUIRED: "1"
         run: |
+          set -o pipefail
           ./ci/fetch-moltenvk.sh 2>&1 | tee moltenvk.log
 
       - name: Generate the Xcode project
