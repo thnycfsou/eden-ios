@@ -166,6 +166,9 @@
 	     new review. I believe raw CMMotionManager accelerometer/gyro updates need no
 	     authorisation prompt on iOS 15 (that is CMMotionActivityManager), but I did not
 	     verify it. -->
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Eden uses Bluetooth to connect compatible game controllers.</string>
+
 	<key>NSMotionUsageDescription</key>
 	<string>Eden uses motion data for games that read the console gyroscope.</string>
 
