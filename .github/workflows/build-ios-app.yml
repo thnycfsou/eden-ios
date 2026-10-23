@@ -49,7 +49,7 @@ env:
 
 jobs:
   app:
-    runs-on: macos-15
+    runs-on: macos-15-intel
     # build-ios-core.yml allows 180. This job does strictly more: the same core build,
     # plus xcodegen, plus a link of ~60 static archives, plus three package-and-verify
     # rounds.
