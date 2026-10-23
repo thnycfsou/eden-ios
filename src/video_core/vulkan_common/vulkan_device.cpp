@@ -849,6 +849,13 @@ void Device::LoadStaticPipelineCache() {
                     "retrying with an empty cache",
                     exception.what());
         create(0, nullptr);
+        std::error_code remove_error;
+        std::filesystem::remove(filename, remove_error);
+        if (remove_error) {
+            LOG_WARNING(Render_Vulkan,
+                        "Could not remove rejected persisted Vulkan pipeline cache {}: {}",
+                        Common::FS::PathToUTF8String(filename), remove_error.message());
+        }
     }
 }
 
