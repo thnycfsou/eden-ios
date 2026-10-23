@@ -3,6 +3,7 @@
 
 #include <array>
 #include <atomic>
+#include <exception>
 #include <memory>
 #include <unordered_map>
 #include <utility>
@@ -374,7 +375,23 @@ struct System::Impl {
 
         // Set up the rest of the system.
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.begin");
-        SystemResultStatus init_result{SetupForApplicationProcess(system, emu_window)};
+        SystemResultStatus init_result{};
+        try {
+            init_result = SetupForApplicationProcess(system, emu_window);
+        } catch (...) {
+            // SetupForApplicationProcess marks the system powered on only after all
+            // subsystems have been created. If a constructor throws earlier, the
+            // frontend's IsPoweredOn() guard cannot initiate rollback for us.
+            try {
+                ShutdownMainProcess();
+            } catch (const std::exception& cleanup_exception) {
+                LOG_CRITICAL(Core, "Cleanup after application setup failure also failed: {}",
+                             cleanup_exception.what());
+            } catch (...) {
+                LOG_CRITICAL(Core, "Cleanup after application setup failure also failed");
+            }
+            throw;
+        }
         LOG_WARNING(Core, "LOAD_CHECKPOINT core.load.setup_application_process.done status={}",
                     static_cast<u32>(init_result));
         if (init_result != SystemResultStatus::Success) {

@@ -8,6 +8,7 @@
 #include <memory>
 #include <numeric>
 #include <optional>
+#include <string_view>
 #include <utility>
 
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
@@ -15,6 +16,7 @@
 #include "common/assert.h"
 #include "common/common_types.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
 #include "common/vector_math.h"
 #include "video_core/host_shaders/astc_decoder_comp_spv.h"
 #include "video_core/host_shaders/queries_prefix_scan_sum_comp_spv.h"
@@ -202,48 +204,68 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
                          vk::Span<VkDescriptorUpdateTemplateEntry> templates,
                          const DescriptorBankInfo& bank_info,
                          vk::Span<VkPushConstantRange> push_constants, std::span<const u32> code,
-                         std::optional<u32> optional_subgroup_size)
+                         std::optional<u32> optional_subgroup_size,
+                         std::string_view diagnostic_name)
     : device{device_} {
-    descriptor_set_layout = device.GetLogical().CreateDescriptorSetLayout({
-        .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .bindingCount = bindings.size(),
-        .pBindings = bindings.data(),
-    });
-    layout = device.GetLogical().CreatePipelineLayout({
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .setLayoutCount = 1,
-        .pSetLayouts = descriptor_set_layout.address(),
-        .pushConstantRangeCount = push_constants.size(),
-        .pPushConstantRanges = push_constants.data(),
-    });
-    if (!templates.empty()) {
-        descriptor_template = device.GetLogical().CreateDescriptorUpdateTemplate({
-            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+    const auto create = [diagnostic_name](std::string_view operation, auto&& factory) {
+        try {
+            return std::forward<decltype(factory)>(factory)();
+        } catch (const vk::Exception& exception) {
+            if (!diagnostic_name.empty()) {
+                LOG_ERROR(Render_Vulkan, "{}: {} failed with {}", diagnostic_name, operation,
+                          exception.what());
+            }
+            throw;
+        }
+    };
+    descriptor_set_layout = create("vkCreateDescriptorSetLayout", [&] {
+        return device.GetLogical().CreateDescriptorSetLayout({
+            .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
             .pNext = nullptr,
             .flags = 0,
-            .descriptorUpdateEntryCount = templates.size(),
-            .pDescriptorUpdateEntries = templates.data(),
-            .templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET,
-            .descriptorSetLayout = *descriptor_set_layout,
-            .pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE,
-            .pipelineLayout = *layout,
-            .set = 0,
+            .bindingCount = bindings.size(),
+            .pBindings = bindings.data(),
+        });
+    });
+    layout = create("vkCreatePipelineLayout", [&] {
+        return device.GetLogical().CreatePipelineLayout({
+            .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .setLayoutCount = 1,
+            .pSetLayouts = descriptor_set_layout.address(),
+            .pushConstantRangeCount = push_constants.size(),
+            .pPushConstantRanges = push_constants.data(),
+        });
+    });
+    if (!templates.empty()) {
+        descriptor_template = create("vkCreateDescriptorUpdateTemplate", [&] {
+            return device.GetLogical().CreateDescriptorUpdateTemplate({
+                .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_UPDATE_TEMPLATE_CREATE_INFO,
+                .pNext = nullptr,
+                .flags = 0,
+                .descriptorUpdateEntryCount = templates.size(),
+                .pDescriptorUpdateEntries = templates.data(),
+                .templateType = VK_DESCRIPTOR_UPDATE_TEMPLATE_TYPE_DESCRIPTOR_SET,
+                .descriptorSetLayout = *descriptor_set_layout,
+                .pipelineBindPoint = VK_PIPELINE_BIND_POINT_COMPUTE,
+                .pipelineLayout = *layout,
+                .set = 0,
+            });
         });
         descriptor_allocator = descriptor_pool.Allocator(device, scheduler, *descriptor_set_layout, bank_info);
     }
     if (code.empty()) {
         return;
     }
-    module = device.GetLogical().CreateShaderModule({
-        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .codeSize = static_cast<u32>(code.size_bytes()),
-        .pCode = code.data(),
+    module = create("vkCreateShaderModule", [&] {
+        return device.GetLogical().CreateShaderModule({
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .pNext = nullptr,
+            .flags = 0,
+            .codeSize = static_cast<u32>(code.size_bytes()),
+            .pCode = code.data(),
+        });
     });
     device.SaveShader(code);
     const VkPipelineShaderStageRequiredSubgroupSizeCreateInfoEXT subgroup_size_ci{
@@ -252,23 +274,25 @@ ComputePass::ComputePass(const Device& device_, Scheduler& scheduler, Descriptor
         .requiredSubgroupSize = optional_subgroup_size ? *optional_subgroup_size : 32U,
     };
     bool use_setup_size = device.IsExtSubgroupSizeControlSupported() && optional_subgroup_size;
-    pipeline = device.GetLogical().CreateComputePipeline(VkComputePipelineCreateInfo{
-        .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
-        .pNext = nullptr,
-        .flags = 0,
-        .stage{
-            .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-            .pNext = use_setup_size ? &subgroup_size_ci : nullptr,
+    pipeline = create("vkCreateComputePipelines", [&] {
+        return device.GetLogical().CreateComputePipeline(VkComputePipelineCreateInfo{
+            .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .pNext = nullptr,
             .flags = 0,
-            .stage = VK_SHADER_STAGE_COMPUTE_BIT,
-            .module = *module,
-            .pName = "main",
-            .pSpecializationInfo = nullptr,
-        },
-        .layout = *layout,
-        .basePipelineHandle = {},
-        .basePipelineIndex = 0,
-    }, device.StaticPipelineCache());
+            .stage{
+                .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                .pNext = use_setup_size ? &subgroup_size_ci : nullptr,
+                .flags = 0,
+                .stage = VK_SHADER_STAGE_COMPUTE_BIT,
+                .module = *module,
+                .pName = "main",
+                .pSpecializationInfo = nullptr,
+            },
+            .layout = *layout,
+            .basePipelineHandle = {},
+            .basePipelineIndex = 0,
+        }, device.StaticPipelineCache());
+    });
 }
 
 ComputePass::~ComputePass() = default;
@@ -382,7 +406,8 @@ ConditionalRenderingResolvePass::ConditionalRenderingResolvePass(
     : ComputePass(device_, scheduler_, descriptor_pool_, INPUT_OUTPUT_DESCRIPTOR_SET_BINDINGS,
                   INPUT_OUTPUT_DESCRIPTOR_UPDATE_TEMPLATE, INPUT_OUTPUT_BANK_INFO,
                   COMPUTE_PUSH_CONSTANT_RANGE<sizeof(ConditionalRenderingResolvePushConstants)>,
-                  RESOLVE_CONDITIONAL_RENDER_COMP_SPV),
+                  RESOLVE_CONDITIONAL_RENDER_COMP_SPV, std::nullopt,
+                  "ConditionalRenderingResolvePass"),
       scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
 
 void ConditionalRenderingResolvePass::Resolve(VkBuffer dst_buffer, VkBuffer src_buffer,
@@ -436,12 +461,14 @@ QueriesPrefixScanPass::QueriesPrefixScanPass(
           device_, scheduler_, descriptor_pool_, QUERIES_SCAN_DESCRIPTOR_SET_BINDINGS,
           QUERIES_SCAN_DESCRIPTOR_UPDATE_TEMPLATE, QUERIES_SCAN_BANK_INFO,
           COMPUTE_PUSH_CONSTANT_RANGE<sizeof(QueriesPrefixScanPushConstants)>,
-          device_.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT) &&
+          (device_.GetSubgroupSupportedStages() & VK_SHADER_STAGE_COMPUTE_BIT) != 0 &&
+                  device_.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_BASIC_BIT) &&
                   device_.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) &&
                   device_.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_SHUFFLE_BIT) &&
                   device_.IsSubgroupFeatureSupported(VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT)
               ? std::span<const u32>(QUERIES_PREFIX_SCAN_SUM_COMP_SPV)
-              : std::span<const u32>(QUERIES_PREFIX_SCAN_SUM_NOSUBGROUPS_COMP_SPV)),
+              : std::span<const u32>(QUERIES_PREFIX_SCAN_SUM_NOSUBGROUPS_COMP_SPV),
+          std::nullopt, "QueriesPrefixScanPass"),
       scheduler{scheduler_}, compute_pass_descriptor_queue{compute_pass_descriptor_queue_} {}
 
 void QueriesPrefixScanPass::Run(VkBuffer accumulation_buffer, VkBuffer dst_buffer,

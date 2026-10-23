@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <type_traits>
 #include "common/container/unordered_map.h"
 #include <utility>
@@ -16,6 +17,7 @@
 #include "video_core/renderer_vulkan/vk_texture_cache.h"
 #include "common/bit_util.h"
 #include "common/common_types.h"
+#include "common/logging.h"
 #include "video_core/engines/maxwell_3d.h"
 #include "video_core/host1x/gpu_device_memory_manager.h"
 #include "video_core/query_cache/query_cache.h"
@@ -37,6 +39,18 @@ using Tegra::Engines::Maxwell3D;
 using VideoCommon::QueryType;
 
 namespace {
+vk::Buffer CreateQueryCacheBuffer(const MemoryAllocator& allocator,
+                                  const VkBufferCreateInfo& create_info, MemoryUsage usage,
+                                  std::string_view purpose) {
+    try {
+        return allocator.CreateBuffer(create_info, usage);
+    } catch (const vk::Exception& exception) {
+        LOG_ERROR(Render_Vulkan, "Query cache {}: vmaCreateBuffer failed with {}", purpose,
+                  exception.what());
+        throw;
+    }
+}
+
 class SamplesQueryBank : public VideoCommon::BankBase {
 public:
     static constexpr size_t BANK_SIZE = 256;
@@ -156,7 +170,9 @@ public:
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
         };
-        accumulation_buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
+        accumulation_buffer = CreateQueryCacheBuffer(memory_allocator, buffer_ci,
+                                                    MemoryUsage::DeviceLocal,
+                                                    "SamplesStreamer accumulation buffer");
         scheduler.RequestOutsideRenderPassOperationContext();
         scheduler.Record([buffer = *accumulation_buffer](vk::CommandBuffer cmdbuf) {
             cmdbuf.FillBuffer(buffer, 0, 8, 0);
@@ -708,7 +724,9 @@ public:
             .pQueueFamilyIndices = nullptr,
         };
 
-        counters_buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
+        counters_buffer = CreateQueryCacheBuffer(memory_allocator, buffer_ci,
+                                                 MemoryUsage::DeviceLocal,
+                                                 "TFBCounterStreamer counters buffer");
         for (auto& c : counter_buffers) {
             c = *counters_buffer;
         }
@@ -1305,7 +1323,8 @@ struct QueryCacheRuntimeImpl {
 
         VkBufferUsageFlags hcr_buffer_usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
         if (device.IsExtConditionalRendering()) {
-            conditional_resolve_pass.emplace(device, scheduler, descriptor_pool, compute_pass_descriptor_queue);
+            conditional_resolve_pass.emplace(device, scheduler, descriptor_pool,
+                                             compute_pass_descriptor_queue);
             hcr_buffer_usage |= VK_BUFFER_USAGE_CONDITIONAL_RENDERING_BIT_EXT;
         }
 
@@ -1319,7 +1338,9 @@ struct QueryCacheRuntimeImpl {
             .queueFamilyIndexCount = 0,
             .pQueueFamilyIndices = nullptr,
         };
-        hcr_resolve_buffer = memory_allocator.CreateBuffer(buffer_ci, MemoryUsage::DeviceLocal);
+        hcr_resolve_buffer = CreateQueryCacheBuffer(memory_allocator, buffer_ci,
+                                                   MemoryUsage::DeviceLocal,
+                                                   "conditional rendering resolve buffer");
     }
 
     VideoCore::RasterizerInterface* rasterizer;

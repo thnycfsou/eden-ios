@@ -8,6 +8,7 @@
 
 #include <optional>
 #include <span>
+#include <string_view>
 #include <utility>
 
 #include "common/common_types.h"
@@ -40,7 +41,8 @@ public:
                          vk::Span<VkDescriptorUpdateTemplateEntry> templates,
                          const DescriptorBankInfo& bank_info,
                          vk::Span<VkPushConstantRange> push_constants, std::span<const u32> code,
-                         std::optional<u32> optional_subgroup_size = std::nullopt);
+                         std::optional<u32> optional_subgroup_size = std::nullopt,
+                         std::string_view diagnostic_name = {});
     ~ComputePass();
 
 protected:
