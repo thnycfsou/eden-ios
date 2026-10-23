@@ -272,7 +272,7 @@ verify_dylib() {
             /System/Library/*|/usr/lib/*) : ;;
             *) _v "non-system dynamic dependency: $dependency"; r=1 ;;
         esac
-    done < <(printf '%s\n' "$dependency_list" | sed '1d; s/ (compatibility version.*$//')
+    done < <(printf '%s\n' "$dependency_list" | sed '1d; s/^[[:space:]]*//; s/ (compatibility version.*$//')
 
     return $r
 }
