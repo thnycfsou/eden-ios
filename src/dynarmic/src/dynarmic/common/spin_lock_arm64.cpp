@@ -7,6 +7,12 @@
 
 #include <oaknut/code_block.hpp>
 #include <oaknut/oaknut.hpp>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#include "dynarmic/backend/arm64/stikjit_arena.hpp"
+#endif
 
 #include "dynarmic/backend/arm64/abi.h"
 #include "dynarmic/common/spin_lock.h"
@@ -42,7 +48,11 @@ struct SpinLockImpl {
 
     void Initialize();
 
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    Backend::Arm64::StikJIT::CodeBlock mem;
+#else
     oaknut::CodeBlock mem;
+#endif
     oaknut::CodeGenerator code;
 
     void (*lock)(volatile int*);
@@ -51,13 +61,9 @@ struct SpinLockImpl {
 
 std::once_flag flag;
 
-// Constructed on first use rather than at namespace scope. SpinLockImpl's constructor
-// allocates an oaknut::CodeBlock, which mmaps executable memory - as a global that ran
-// during static initialisation, i.e. at dyld load, before main() and before any UI could
-// exist. On a platform where executable memory has to be granted (iOS without StikDebug or
-// the JIT entitlement) that allocation fails, and failing there means the process dies
-// before it can tell anyone why. Deferring it to first use moves the failure to a point
-// where the application is running and can report it.
+// Constructed on first use rather than at namespace scope. On iOS its generated code
+// uses the prepared StikJIT arena; other platforms use oaknut's native CodeBlock.
+// Deferring construction also avoids allocating executable memory during dyld startup.
 //
 // Function-local statics are initialised thread-safely since C++11, so this does not need
 // its own guard, and it also removes a static-initialisation-order dependency.
@@ -67,8 +73,13 @@ SpinLockImpl& Impl() noexcept {
 }
 
 SpinLockImpl::SpinLockImpl()
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+        : mem{4096}
+        , code{mem.wptr(), mem.xptr()} {}
+#else
         : mem{4096}
         , code{mem.ptr(), mem.ptr()} {}
+#endif
 
 void SpinLockImpl::Initialize() {
     mem.unprotect();
