@@ -13,6 +13,7 @@ struct ContentView: View {
 
     @State private var importKind: ImportKind?
     @State private var showSetupGuide = false
+    @State private var showSettings = false
     @State private var importReport: String?
 
     var body: some View {
@@ -25,6 +26,14 @@ struct ContentView: View {
             .listStyle(.insetGrouped)
             .navigationTitle("Eden")
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                    }
+                    .accessibilityLabel("Settings")
+                }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
                         showSetupGuide = true
@@ -59,6 +68,17 @@ struct ContentView: View {
         .background(
             Color.clear.sheet(isPresented: $showSetupGuide) {
                 SetupGuideView()
+            }
+        )
+        .background(
+            Color.clear.sheet(isPresented: $showSettings) {
+                if #available(iOS 16.0, *) {
+                    CoreSettingsView()
+                        .presentationDetents([.medium, .large])
+                        .presentationDragIndicator(.visible)
+                } else {
+                    CoreSettingsView()
+                }
             }
         )
         .background(
@@ -208,6 +228,121 @@ enum ImportKind: String, Identifiable {
             return [.plainText, .data]
         case .firmware:
             return [.data]
+        }
+    }
+}
+
+struct CoreSettingsView: View {
+    @Environment(\.dismiss) private var dismiss
+    @AppStorage("eden.profile") private var profile = "compatibility"
+    @AppStorage("eden_resolution") private var resolution = "0.5x"
+    @AppStorage("eden_use_docked") private var docked = "No"
+    @AppStorage("eden_multi_core") private var multiCore = "Disabled"
+    @AppStorage("eden_async_gpu") private var asyncGPU = "Disabled"
+    @AppStorage("eden_memory_layout") private var memoryLayout = "4GB"
+    @AppStorage("eden_speed_limit") private var speedLimit = "Enabled"
+    @AppStorage("eden.show_controls") private var showControls = true
+    @AppStorage("eden.control_opacity") private var controlOpacity = 0.72
+    @State private var advancedExpanded = false
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section("Profile") {
+                    Picker("Mode", selection: $profile) {
+                        Text("Compatibility").tag("compatibility")
+                        Text("Balanced").tag("balanced")
+                        Text("Custom").tag("custom")
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Core changes apply when the next game starts. Control changes apply now.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+
+                Section("Video") {
+                    Picker("Internal resolution", selection: settingBinding($resolution)) {
+                        ForEach(["0.25x", "0.5x", "0.75x", "1x", "2x"], id: \.self) { value in
+                            Text(value).tag(value)
+                        }
+                    }
+                    Picker("Console mode", selection: settingBinding($docked)) {
+                        Text("Handheld").tag("No")
+                        Text("Docked").tag("Yes")
+                    }
+                }
+
+                Section("Execution") {
+                    Toggle("Multicore CPU", isOn: boolBinding($multiCore))
+                    Toggle("Asynchronous GPU", isOn: boolBinding($asyncGPU))
+                }
+
+                Section("Controls") {
+                    Toggle("On-screen controls", isOn: $showControls)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Control opacity")
+                        Slider(value: $controlOpacity, in: 0.3...1.0)
+                            .accessibilityLabel("On-screen control opacity")
+                    }
+                    .disabled(!showControls)
+                }
+
+                Section {
+                    DisclosureGroup("Advanced", isExpanded: $advancedExpanded) {
+                        Picker("Emulated memory", selection: settingBinding($memoryLayout)) {
+                            ForEach(["4GB", "6GB", "8GB"], id: \.self) { value in
+                                Text(value).tag(value)
+                            }
+                        }
+                        Toggle("Speed limiter", isOn: boolBinding($speedLimit))
+                        Text("Emulated memory is the Switch guest limit, not iPhone RAM.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            .tint(Color(red: 0.91, green: 0.24, blue: 0.77))
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .navigationViewStyle(.stack)
+        .onChange(of: profile) { value in applyProfile(value) }
+    }
+
+    private func settingBinding(_ value: Binding<String>) -> Binding<String> {
+        Binding(get: { value.wrappedValue }, set: {
+            value.wrappedValue = $0
+            markCustom()
+        })
+    }
+
+    private func boolBinding(_ value: Binding<String>) -> Binding<Bool> {
+        Binding(get: { value.wrappedValue == "Enabled" },
+                set: {
+                    value.wrappedValue = $0 ? "Enabled" : "Disabled"
+                    markCustom()
+                })
+    }
+
+    private func markCustom() {
+        if profile != "custom" { profile = "custom" }
+    }
+
+    private func applyProfile(_ value: String) {
+        switch value {
+        case "compatibility":
+            resolution = "0.5x"; docked = "No"; multiCore = "Disabled"
+            asyncGPU = "Disabled"; memoryLayout = "4GB"; speedLimit = "Enabled"
+        case "balanced":
+            resolution = "1x"; docked = "No"; multiCore = "Disabled"
+            asyncGPU = "Enabled"; memoryLayout = "4GB"; speedLimit = "Enabled"
+        default:
+            break
         }
     }
 }

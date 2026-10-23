@@ -9,6 +9,8 @@
 
 #include <atomic>
 #include <bit>
+#include <limits>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -45,14 +47,11 @@ class SparseLargeVector final {
 public:
     constexpr SparseLargeVector() = default;
 
-    explicit SparseLargeVector(std::size_t count) noexcept
-        : alloc_size{count * sizeof(T)}
+    explicit SparseLargeVector(std::size_t count)
+        : alloc_size{CheckedByteSize(count)}
+        , committed_pages(MetadataPageCount(alloc_size))
     {
         base_ptr = static_cast<T*>(AllocateMemoryPages(alloc_size));
-
-        // each item in vector holds information for 64 pages
-        auto denom = HostPageSize * 64;
-        committed_pages = std::vector<std::atomic<u64>>((alloc_size + denom - 1) / denom);
     }
 
     ~SparseLargeVector() noexcept {
@@ -64,20 +63,27 @@ public:
     SparseLargeVector(SparseLargeVector&& other) = delete;
     SparseLargeVector& operator=(SparseLargeVector&& other) = delete;
 
-    void ResizeAndClear(std::size_t count) noexcept {
-        if (auto const new_size = count * sizeof(T); new_size != alloc_size) {
-            FreeMemoryPages(base_ptr, alloc_size);
-            alloc_size = new_size;
-            base_ptr = static_cast<T*>(AllocateMemoryPages(alloc_size));
+    void ResizeAndClear(std::size_t count) {
+        const std::size_t new_size = CheckedByteSize(count);
+        if (new_size != alloc_size) {
+            // Construct metadata before releasing the current allocation. A vector
+            // allocation can throw, so keep the existing object intact until every
+            // replacement resource has been prepared.
+            auto new_committed_pages = MakeMetadata(new_size);
+            T* new_base_ptr = static_cast<T*>(AllocateMemoryPages(new_size));
+            T* old_base_ptr = base_ptr;
+            const std::size_t old_size = alloc_size;
 
-            auto denom = HostPageSize * 64;
-            committed_pages = std::vector<std::atomic<u64>>((alloc_size + denom - 1) / denom);
+            base_ptr = new_base_ptr;
+            alloc_size = new_size;
+            committed_pages.swap(new_committed_pages);
+            FreeMemoryPages(old_base_ptr, old_size);
         }
     }
 
     /// Returns a reference to the value of the requested index and allocates memory if needed.
     T& GetAndFault(std::size_t index) noexcept {
-        if (index > alloc_size / sizeof(T)) {
+        if (index >= size()) {
             UNREACHABLE_MSG("Out of bounds RW access on SparseLargeVector @ {}", index);
         }
 
@@ -89,6 +95,9 @@ public:
 
     /// Returns a reference to the value of the requested index if initialized, or will otherwise return a zero-initialized object.
     const T& GetOrDefault(std::size_t index) const {
+        if (index >= size() || base_ptr == nullptr) {
+            UNREACHABLE_MSG("Out of bounds read on SparseLargeVector @ {} (size {})", index, size());
+        }
 #ifdef _WIN32
         if (!IsCommittedPage(index)) {
             return *reinterpret_cast<const T*>(&default_val);
@@ -99,15 +108,25 @@ public:
     }
 
     void Set(std::size_t index, const T& value) noexcept {
-        if (index > alloc_size / sizeof(T)) {
+        if (index >= size()) {
             LOG_CRITICAL(Common_Memory, "Out of bounds write on SparseLargeVector @ {}", index);
             return;
         }
-        if (IsCommittedPage(index) || CommitPage(index))
+        if (IsCommittedPage(index) || CommitPage(index)) {
             base_ptr[index] = value;
+        } else {
+            LOG_CRITICAL(Common_Memory, "Failed to commit SparseLargeVector index {}", index);
+        }
     }
 
     void ZeroRegion(std::size_t start, std::size_t end_) noexcept {
+        if (start > end_ || end_ > size() || (size() != 0 && base_ptr == nullptr)) {
+            UNREACHABLE_MSG("Invalid SparseLargeVector zero range [{}, {}) for size {}", start,
+                            end_, size());
+        }
+        if (start == end_) {
+            return;
+        }
         u64 base = reinterpret_cast<u64>(&base_ptr[start]);
         const u64 end = reinterpret_cast<u64>(&base_ptr[end_]);
 
@@ -137,18 +156,32 @@ public:
         }
     }
 
-    constexpr void CommitRegion(size_t index, size_t end_) {
+    [[nodiscard]] bool CommitRegion(size_t index, size_t end_) {
+        if (index > end_ || end_ > size() || (size() != 0 && base_ptr == nullptr)) {
+            LOG_ERROR(Common_Memory, "Invalid SparseLargeVector commit range [{}, {}) for size {}",
+                      index, end_, size());
+            return false;
+        }
         const u64 base = static_cast<u64>(index) * sizeof(T);
         const u64 end = static_cast<u64>(end_) * sizeof(T);
 
         for (u64 page = AlignDown(base, HostPageSize); page < end; page += HostPageSize) {
             if (!IsCommittedPage(page / sizeof(T))) {
-                CommitPage(page / sizeof(T));
+                if (!CommitPage(page / sizeof(T))) {
+                    return false;
+                }
             }
         }
+        return true;
     }
 
-    constexpr T& GetUnchecked(size_t index) {
+    T& GetUnchecked(size_t index) {
+        if (index >= size()) {
+            UNREACHABLE_MSG("Out of bounds SparseLargeVector access @ {} (size {})", index, size());
+        }
+        // The caller must have successfully committed this range first. Keeping the
+        // committed-page bitmap out of this per-entry hot path avoids an extra atomic
+        // load for every guest 4 KiB page mapped.
         return base_ptr[index];
     }
 
@@ -165,19 +198,46 @@ public:
     }
 
 private:
+    static std::size_t MetadataPageCount(std::size_t byte_size) noexcept {
+        const std::size_t pages_per_group = HostPageSize * 64;
+        return byte_size / pages_per_group + (byte_size % pages_per_group != 0);
+    }
+
+    static std::vector<std::atomic<u64>> MakeMetadata(std::size_t byte_size) {
+        return std::vector<std::atomic<u64>>(MetadataPageCount(byte_size));
+    }
+
+    static std::size_t CheckedByteSize(std::size_t count) {
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw std::length_error("SparseLargeVector size overflows size_t");
+        }
+        return count * sizeof(T);
+    }
+
     [[nodiscard]] constexpr bool IsCommittedPage(std::size_t index) const noexcept {
-        if (index > alloc_size / sizeof(T)) {
+        if (index >= size()) {
             LOG_CRITICAL(Common_Memory, "Out of bounds access on large vector @ {}", index);
             return false;
         }
 
         auto page = (index * sizeof(T)) >> HostPageBits;
+        if ((page >> 6) >= committed_pages.size()) {
+            LOG_CRITICAL(Common_Memory, "Out of bounds commit metadata access on large vector @ {}",
+                         index);
+            return false;
+        }
         auto val = committed_pages[page >> 6].load(std::memory_order_acquire);
         return (val >> (page & 63)) & 1;
     }
 
     constexpr bool CommitPage(std::size_t index) noexcept {
+        if (index >= size() || base_ptr == nullptr) {
+            return false;
+        }
         auto page_index = (index * sizeof(T)) >> HostPageBits;
+        if ((page_index >> 6) >= committed_pages.size()) {
+            return false;
+        }
         auto page = reinterpret_cast<uintptr_t>(base_ptr + index) & HostPageMask;
 #if defined(_WIN32)
         if (!CommitVectorPage(page, true)) {

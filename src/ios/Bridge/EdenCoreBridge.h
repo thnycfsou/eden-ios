@@ -141,6 +141,17 @@ bool eden_bridge_start(const char *rom_path, const char *data_root);
 void eden_bridge_set_multi_core_enabled(bool enabled);
 
 /**
+ * Set one validated libretro core option for the next session. Must be called before
+ * eden_bridge_start; values are copied and applied when the core declares its options,
+ * before retro_init reads them.
+ */
+bool eden_bridge_set_option(const char *key, const char *value);
+
+/// Queue a pause/resume request; the core transition is performed on its owner thread.
+void eden_bridge_set_paused(bool paused);
+bool eden_bridge_is_paused(void);
+
+/**
  * Ask the emulation thread to leave the run loop, then join it.
  * MAIN THREAD. Blocks until retro_deinit has returned, or until the timeout.
  *
@@ -162,6 +173,9 @@ void eden_bridge_copy_status(char *buf, size_t len);
 /// the two apart needs RetroEmuWindow::PresentedFrameCount(), which exists
 /// (retro_emu_window.h) but is not exported through eden_libretro.h.
 double eden_bridge_iterations_per_second(void);
+
+/// Number of newly presented frames, not retro_run calls. ANY THREAD.
+unsigned long long eden_bridge_presented_frame_count(void);
 
 // --- input (producer side; ANY THREAD) -------------------------------------
 //

@@ -57,6 +57,7 @@ static os_log_t EdenLog(void) {
 typedef struct {
     char key[64];
     char value[64];   // the DEFAULT, i.e. the first alternative after ';'
+    bool overridden;
 } EdenOption;
 
 static struct {
@@ -69,6 +70,8 @@ static struct {
     _Atomic int state;             // EdenBridgeState
     _Atomic bool should_run;       // cleared by eden_bridge_stop
     _Atomic bool visible;
+    _Atomic bool pause_requested;
+    _Atomic bool paused;
     _Atomic bool shutdown_requested;  // RETRO_ENVIRONMENT_SHUTDOWN from the core
     pthread_t thread;
     bool thread_valid;
@@ -89,6 +92,9 @@ static struct {
     // --- core options, learned from RETRO_ENVIRONMENT_SET_VARIABLES -------
     EdenOption options[EDEN_MAX_OPTIONS];
     int option_count;
+    EdenOption overrides[EDEN_MAX_OPTIONS];
+    int override_count;
+    pthread_mutex_t options_mutex;
     _Atomic int multi_core_override;
 
     // --- stats ------------------------------------------------------------
@@ -129,10 +135,13 @@ static void EdenBridgeInitOnce(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         pthread_mutex_init(&g.status_mutex, NULL);
+        pthread_mutex_init(&g.options_mutex, NULL);
         pthread_mutex_init(&g.gate_mutex, NULL);
         pthread_cond_init(&g.gate_cond, NULL);
         atomic_store(&g.state, EdenBridgeStateIdle);
         atomic_store(&g.visible, true);
+        atomic_store(&g.pause_requested, false);
+        atomic_store(&g.paused, false);
         atomic_store(&g.multi_core_override, -1);
         strlcpy(g.status, "idle", sizeof(g.status));
     });
@@ -188,6 +197,30 @@ static const char *EdenLookupOption(const char *key) {
     return NULL;
 }
 
+static const char *EdenOptionOverride(const char *key) {
+    if (key == NULL) return NULL;
+    for (int i = 0; i < g.override_count; ++i) {
+        if (strcmp(g.overrides[i].key, key) == 0) return g.overrides[i].value;
+    }
+    return NULL;
+}
+
+static bool EdenOptionValueAllowed(const char *key, const char *value) {
+    if (key == NULL || value == NULL) return false;
+    if (strcmp(key, "eden_resolution") == 0)
+        return strcmp(value, "0.25x") == 0 || strcmp(value, "0.5x") == 0 ||
+               strcmp(value, "0.75x") == 0 || strcmp(value, "1x") == 0 ||
+               strcmp(value, "2x") == 0;
+    if (strcmp(key, "eden_use_docked") == 0 || strcmp(key, "eden_multi_core") == 0 ||
+        strcmp(key, "eden_async_gpu") == 0 || strcmp(key, "eden_speed_limit") == 0)
+        return strcmp(value, "Enabled") == 0 || strcmp(value, "Disabled") == 0 ||
+               strcmp(value, "Yes") == 0 || strcmp(value, "No") == 0;
+    if (strcmp(key, "eden_memory_layout") == 0)
+        return strcmp(value, "4GB") == 0 || strcmp(value, "6GB") == 0 ||
+               strcmp(value, "8GB") == 0;
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // libretro callbacks
 // ---------------------------------------------------------------------------
@@ -205,13 +238,22 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
 
     case RETRO_ENVIRONMENT_SET_VARIABLES: {
         const struct retro_variable *vars = (const struct retro_variable *)data;
+        pthread_mutex_lock(&g.options_mutex);
         g.option_count = 0;
         for (; vars != NULL && vars->key != NULL && g.option_count < EDEN_MAX_OPTIONS; ++vars) {
             EdenOption *opt = &g.options[g.option_count];
             strlcpy(opt->key, vars->key, sizeof(opt->key));
             EdenParseOptionDefault(vars->value, opt->value, sizeof(opt->value));
+            const char *override = EdenOptionOverride(opt->key);
+            if (override != NULL) {
+                strlcpy(opt->value, override, sizeof(opt->value));
+                opt->overridden = true;
+            } else {
+                opt->overridden = false;
+            }
             ++g.option_count;
         }
+        pthread_mutex_unlock(&g.options_mutex);
         EDEN_LOG("core declared %d options", g.option_count);
         return true;
     }
@@ -221,10 +263,12 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
         if (var == NULL) {
             return false;
         }
+        pthread_mutex_lock(&g.options_mutex);
         if (var->key != NULL && strcmp(var->key, "eden_multi_core") == 0) {
             const int override = atomic_load(&g.multi_core_override);
             if (override >= 0) {
                 var->value = override ? "Enabled" : "Disabled";
+                pthread_mutex_unlock(&g.options_mutex);
                 return true;
             }
         }
@@ -232,7 +276,9 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
         // Returning false makes the core fall back to the default it passed to
         // ReadBoolOption / ReadStringOption, which is the same answer. Both paths are
         // safe; this one is just honest about whether we knew the key.
-        return var->value != NULL;
+        const bool found = var->value != NULL;
+        pthread_mutex_unlock(&g.options_mutex);
+        return found;
     }
 
     case RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE: {
@@ -323,6 +369,49 @@ static bool EdenEnvironmentCB(unsigned cmd, void *data) {
 void eden_bridge_set_multi_core_enabled(bool enabled) {
     EdenBridgeInitOnce();
     atomic_store(&g.multi_core_override, enabled ? 1 : 0);
+}
+
+void eden_bridge_set_paused(bool paused) {
+    EdenBridgeInitOnce();
+    if (atomic_load(&g.state) != EdenBridgeStateRunning) return;
+    atomic_store(&g.pause_requested, paused);
+    pthread_mutex_lock(&g.gate_mutex);
+    pthread_cond_broadcast(&g.gate_cond);
+    pthread_mutex_unlock(&g.gate_mutex);
+}
+
+bool eden_bridge_is_paused(void) {
+    EdenBridgeInitOnce();
+    return atomic_load(&g.paused);
+}
+
+bool eden_bridge_set_option(const char *key, const char *value) {
+    EdenBridgeInitOnce();
+    if (!EdenOptionValueAllowed(key, value) || atomic_load(&g.state) != EdenBridgeStateIdle) {
+        return false;
+    }
+    pthread_mutex_lock(&g.options_mutex);
+    if (atomic_load(&g.state) != EdenBridgeStateIdle) {
+        pthread_mutex_unlock(&g.options_mutex);
+        return false;
+    }
+    for (int i = 0; i < g.override_count; ++i) {
+        if (strcmp(g.overrides[i].key, key) == 0) {
+            strlcpy(g.overrides[i].value, value, sizeof(g.overrides[i].value));
+            pthread_mutex_unlock(&g.options_mutex);
+            return true;
+        }
+    }
+    if (g.override_count == EDEN_MAX_OPTIONS) {
+        pthread_mutex_unlock(&g.options_mutex);
+        return false;
+    }
+    EdenOption *override = &g.overrides[g.override_count++];
+    strlcpy(override->key, key, sizeof(override->key));
+    strlcpy(override->value, value, sizeof(override->value));
+    override->overridden = true;
+    pthread_mutex_unlock(&g.options_mutex);
+    return true;
 }
 
 static void EdenVideoRefreshCB(const void *data, unsigned width, unsigned height, size_t pitch) {
@@ -510,21 +599,34 @@ static void *EdenEmulationThread(void *arg) {
 
     EdenSetStatus("running");
     atomic_store(&g.state, EdenBridgeStateRunning);
+    bool core_paused = false;
 
     // 7. The run loop.
     double window_start = EdenNowSeconds();
     unsigned long long window_base = atomic_load(&g.iterations);
 
     while (atomic_load(&g.should_run)) {
+        const bool pause_requested = atomic_load(&g.pause_requested);
+        if (pause_requested != core_paused) {
+            eden_libretro_set_paused(pause_requested);
+            core_paused = pause_requested;
+            atomic_store(&g.paused, core_paused);
+            EdenSetStatus(core_paused ? "paused" : "running");
+        }
+        if (core_paused) {
+            pthread_mutex_lock(&g.gate_mutex);
+            while (atomic_load(&g.pause_requested) && atomic_load(&g.should_run)) {
+                pthread_cond_wait(&g.gate_cond, &g.gate_mutex);
+            }
+            pthread_mutex_unlock(&g.gate_mutex);
+            continue;
+        }
+
         // Backgrounded: stop calling retro_run entirely.
         //
-        // HONEST LIMIT: this parks the FRONTEND loop, and eden_libretro_set_visible
-        // makes RendererVulkan::Composite early-return, but nothing here stops Eden's
-        // own guest CPU threads or its GPU thread. Core::System exposes Run / Pause /
-        // ShutdownMainProcess and nothing that libretro can reach to suspend them
-        // (retro_core.cpp:516-528 makes the same observation about reset). Whether
-        // that is enough to survive a background transition without iOS killing the
-        // app for GPU work is untested.
+        // Backgrounding parks the frontend loop and eden_libretro_set_visible makes
+        // RendererVulkan::Composite early-return. Explicit user pause is applied on
+        // this owner thread below; background suspension remains a separate policy.
         if (!atomic_load(&g.visible)) {
             EdenWaitWhileHidden();
             if (!atomic_load(&g.should_run)) {
@@ -558,6 +660,8 @@ static void *EdenEmulationThread(void *arg) {
     retro_deinit();
 
     atomic_store(&g.state, EdenBridgeStateIdle);
+    atomic_store(&g.paused, false);
+    atomic_store(&g.pause_requested, false);
     atomic_store(&g.ips, 0.0);
     // "%s" rather than passing the choice straight in, so -Wformat-security has
     // nothing to say about a non-literal format string.
@@ -608,16 +712,20 @@ void eden_bridge_set_visible(bool visible) {
 bool eden_bridge_start(const char *rom_path, const char *data_root) {
     EdenBridgeInitOnce();
 
-    if (atomic_load(&g.state) != EdenBridgeStateIdle) {
+    int expected_state = EdenBridgeStateIdle;
+    if (!atomic_compare_exchange_strong(&g.state, &expected_state,
+                                        (int)EdenBridgeStateStarting)) {
         EdenSetStatus("a session is already running");
         return false;
     }
     if (!eden_stikjit_arena_ready() || !eden_stikjit_execution_test_passed()) {
         EdenSetStatus("start refused: StikJIT arena has not passed the ARM64 RX execution test");
+        atomic_store(&g.state, EdenBridgeStateIdle);
         return false;
     }
     if (rom_path == NULL || rom_path[0] == '\0' || data_root == NULL || data_root[0] == '\0') {
         EdenSetStatus("start refused: missing ROM path or data root");
+        atomic_store(&g.state, EdenBridgeStateIdle);
         return false;
     }
     if (g.layer == NULL) {
@@ -626,7 +734,9 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
         // VK_ERROR_INITIALIZATION_FAILED throw out of a member-initialiser list.
         EdenSetStatus("start refused: no CAMetalLayer attached. The emulation view must "
                       "be on screen before a game can start.");
-        atomic_store(&g.state, EdenBridgeStateFailed);
+        // No thread or core resource was created; keep the bridge reusable after this
+        // rejected attempt is dismissed by the frontend.
+        atomic_store(&g.state, EdenBridgeStateIdle);
         return false;
     }
 
@@ -636,6 +746,8 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
     atomic_store(&g.should_run, true);
     atomic_store(&g.shutdown_requested, false);
     atomic_store(&g.visible, true);
+    atomic_store(&g.pause_requested, false);
+    atomic_store(&g.paused, false);
     atomic_store(&g.iterations, 0ULL);
     atomic_store(&g.ips, 0.0);
     atomic_store(&g.button_mask, 0u);
@@ -661,7 +773,7 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
 
     if (rc != 0) {
         atomic_store(&g.should_run, false);
-        atomic_store(&g.state, EdenBridgeStateFailed);
+        atomic_store(&g.state, EdenBridgeStateIdle);
         EdenSetStatus("could not create the emulation thread (errno %d)", rc);
         return false;
     }
@@ -716,6 +828,11 @@ void eden_bridge_copy_status(char *buf, size_t len) {
 double eden_bridge_iterations_per_second(void) {
     EdenBridgeInitOnce();
     return atomic_load(&g.ips);
+}
+
+unsigned long long eden_bridge_presented_frame_count(void) {
+    EdenBridgeInitOnce();
+    return (unsigned long long)eden_libretro_presented_frame_count();
 }
 
 // --- input producers -------------------------------------------------------

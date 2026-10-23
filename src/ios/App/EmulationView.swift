@@ -8,7 +8,9 @@ import UIKit
 struct EmulationView: View {
 
     @EnvironmentObject private var session: EmulatorSession
-    @State private var showOverlay = true
+    @AppStorage("eden.show_controls") private var showOverlay = true
+    @AppStorage("eden.control_opacity") private var controlOpacity = 0.72
+    @State private var showSettings = false
 
     var body: some View {
         ZStack {
@@ -18,7 +20,7 @@ struct EmulationView: View {
                 .ignoresSafeArea()
 
             TouchControls()
-                .opacity(showOverlay ? 1 : 0)
+                .opacity(showOverlay ? controlOpacity : 0)
                 .allowsHitTesting(showOverlay)
 
             VStack {
@@ -34,16 +36,42 @@ struct EmulationView: View {
         .onAppear {
             session.emulationSurfaceDidAppear()
         }
+        .sheet(isPresented: $showSettings) {
+            if #available(iOS 16.0, *) {
+                CoreSettingsView()
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            } else {
+                CoreSettingsView()
+            }
+        }
     }
 
     private var hud: some View {
         HStack(spacing: 12) {
+            Button {
+                showSettings = true
+            } label: {
+                Image(systemName: "ellipsis.circle.fill")
+                    .font(.title2)
+            }
+            .accessibilityLabel("Game settings")
+
+            Button {
+                session.togglePause()
+            } label: {
+                Image(systemName: session.isPaused ? "play.circle.fill" : "pause.circle.fill")
+                    .font(.title2)
+            }
+            .accessibilityLabel(session.isPaused ? "Resume game" : "Pause game")
+
             Button {
                 session.stop()
             } label: {
                 Image(systemName: "stop.circle.fill")
                     .font(.title2)
             }
+            .accessibilityLabel("Stop game")
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(session.currentGame?.name ?? "Eden")
@@ -56,14 +84,15 @@ struct EmulationView: View {
             }
 
             Spacer()
-
-            // Labelled "it/s", not "fps", and deliberately. retro_run returns either
-            // when a frame is presented or when kFrameWaitTimeout (50 ms,
-            // retro_core.cpp:132) elapses, so a completely stalled guest still reports
-            // 20. Calling that "20 fps" would make a hung emulator look like a slow one.
-            Text(session.rateDescription)
-                .font(.caption.monospacedDigit())
-                .foregroundColor(.secondary)
+            if let fps = session.framesPerSecond {
+                Text(String(format: "%.0f FPS", fps))
+                    .font(.caption.monospacedDigit())
+                    .foregroundColor(.secondary)
+            } else if session.noNewFrames {
+                Text("No new frames")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
         }
         .padding(10)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))

@@ -11,6 +11,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stdint.h>
 
 // eden_libretro is built with CXX_VISIBILITY_PRESET hidden (src/libretro_core/
 // CMakeLists.txt) so everything the archive does not explicitly need to hand to the
@@ -81,6 +82,15 @@ EDEN_LIBRETRO_API void eden_libretro_set_visible(bool visible);
  * RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY, and failing that to Eden's own default.
  */
 EDEN_LIBRETRO_API void eden_libretro_set_data_root(const char* path);
+
+/// Called only after RendererVulkan presents a new frame. Safe from the GPU thread.
+EDEN_LIBRETRO_API void eden_libretro_note_frame_presented(void);
+
+/// Number of newly presented frames since the most recent retro_init.
+EDEN_LIBRETRO_API uint64_t eden_libretro_presented_frame_count(void);
+
+/// Pause or resume the core. Called by the bridge's emulation thread.
+EDEN_LIBRETRO_API void eden_libretro_set_paused(bool paused);
 
 #ifdef __cplusplus
 }

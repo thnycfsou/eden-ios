@@ -8,6 +8,8 @@
 #include <algorithm>
 #include <cstring>
 #include <mutex>
+#include <new>
+#include <stdexcept>
 #include <span>
 #include <thread>
 #include <type_traits>
@@ -102,7 +104,11 @@ struct Memory::Impl {
 
         u64 protect_bytes = 0, protect_begin = 0;
 
-        current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr + size) >> YUZU_PAGEBITS);
+        if (!current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS,
+                                                       (vaddr + size) >> YUZU_PAGEBITS)) {
+            LOG_CRITICAL(HW_Memory, "Failed to commit page-table metadata before protecting guest memory");
+            return;
+        }
         for (u64 addr = vaddr; addr < vaddr + size; addr += YUZU_PAGESIZE) {
             const Common::PageType page_type = current_page_table->entries.GetUnchecked(addr >> YUZU_PAGEBITS).Type();
             switch (page_type) {
@@ -244,7 +250,13 @@ struct Memory::Impl {
         std::size_t page_offset = addr & YUZU_PAGEMASK;
         bool user_accessible = true;
 
-        current_page_table->entries.CommitRegion(page_index, page_index + (size >> YUZU_PAGEBITS) + 1);
+        const std::size_t page_end = size == 0
+            ? page_index
+            : ((GetInteger(addr) + size - 1) >> YUZU_PAGEBITS) + 1;
+        if (!current_page_table->entries.CommitRegion(page_index, page_end)) {
+            LOG_ERROR(HW_Memory, "Failed to commit page-table metadata for guest read/write block");
+            return false;
+        }
         while (remaining_size != 0) {
             const std::size_t copy_amount = (std::min)(std::size_t(YUZU_PAGESIZE) - page_offset, remaining_size);
             const auto current_vaddr = u64((page_index << YUZU_PAGEBITS) + page_offset);
@@ -407,7 +419,11 @@ struct Memory::Impl {
 
         const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
 
-        current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr >> YUZU_PAGEBITS) + num_pages);
+        if (!current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS,
+                                                       (vaddr >> YUZU_PAGEBITS) + num_pages)) {
+            LOG_CRITICAL(HW_Memory, "Failed to commit page-table metadata before marking debug memory");
+            return;
+        }
         for (u64 i = 0; i < num_pages; ++i, vaddr += YUZU_PAGESIZE) {
             auto& entry = current_page_table->entries.GetUnchecked(vaddr >> YUZU_PAGEBITS);
             const auto [pointer, type, block] = entry.PointerTypeBlock(true);
@@ -470,7 +486,11 @@ struct Memory::Impl {
         // is different). This assumes the specified GPU address region is contiguous as well.
 
         const u64 num_pages = ((vaddr + size - 1) >> YUZU_PAGEBITS) - (vaddr >> YUZU_PAGEBITS) + 1;
-        current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS, (vaddr >> YUZU_PAGEBITS) + num_pages);
+        if (!current_page_table->entries.CommitRegion(vaddr >> YUZU_PAGEBITS,
+                                                       (vaddr >> YUZU_PAGEBITS) + num_pages)) {
+            LOG_CRITICAL(HW_Memory, "Failed to commit page-table metadata before marking cached memory");
+            return;
+        }
         for (u64 i = 0; i < num_pages; ++i, vaddr += YUZU_PAGESIZE) {
             auto& entry = current_page_table->entries.GetUnchecked(vaddr >> YUZU_PAGEBITS);
             const Common::PageType page_type = entry.Type();
@@ -539,7 +559,9 @@ struct Memory::Impl {
                   base * YUZU_PAGESIZE, (base + size) * YUZU_PAGESIZE);
 
         const auto end = base + size;
-        ASSERT_MSG(end <= page_table.entries.size(), "out of range mapping at {:016X}", base + page_table.entries.size());
+        if (end < base || end > page_table.entries.size()) {
+            throw std::out_of_range("page-table mapping range is outside the guest address space");
+        }
 
         if (!target) {
             ASSERT_MSG(type != Common::PageType::Memory,
@@ -550,9 +572,15 @@ struct Memory::Impl {
             auto current_block = block_count.fetch_add(1, std::memory_order_relaxed);
             ASSERT(current_block != 65535);
 
-            page_table.entries.CommitRegion(base, end);
+            if (!page_table.entries.CommitRegion(base, end)) {
+                throw std::bad_alloc{};
+            }
             while (base != end) {
-                auto host_ptr = reinterpret_cast<u64>(system.DeviceMemory().GetPointer<u8>(target)) - (base << YUZU_PAGEBITS);;
+                u8* host_base = system.DeviceMemory().GetPointer<u8>(target);
+                if (host_base == nullptr) {
+                    throw std::runtime_error("page-table mapping has no backing host memory");
+                }
+                auto host_ptr = reinterpret_cast<u64>(host_base) - (base << YUZU_PAGEBITS);
                 auto& entry = page_table.entries.GetUnchecked(base);
 
                 entry.Store(false, type, current_block, host_ptr);

@@ -22,7 +22,9 @@ final class EmulatorSession: ObservableObject {
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var status: String = "idle"
-    @Published private(set) var iterationsPerSecond: Double = 0
+    @Published private(set) var framesPerSecond: Double?
+    @Published private(set) var noNewFrames = false
+    @Published private(set) var isPaused = false
     @Published private(set) var currentGame: GameEntry?
 
     /// Set when a launch is refused because JIT is not available, so the UI can present
@@ -44,6 +46,9 @@ final class EmulatorSession: ObservableObject {
     /// scope at the end of the launch call would revoke access midway through play.
     private var scopedURL: URL?
     private var pendingGame: GameEntry?
+    private var lastPresentedFrameCount: UInt64 = 0
+    private var lastFrameSampleDate: Date?
+    private var lastNewFrameDate: Date?
 
     private var pollTimer: AnyCancellable?
 
@@ -129,6 +134,40 @@ final class EmulatorSession: ObservableObject {
         eden_jit_lock_verdict()
         phase = .starting
         status = "starting"
+        framesPerSecond = nil
+        noNewFrames = false
+        lastPresentedFrameCount = 0
+        lastFrameSampleDate = nil
+        lastNewFrameDate = nil
+
+        // Take one immutable snapshot of the persisted frontend choices before the
+        // bridge creates its emulation thread. The bridge validates and publishes
+        // these values when retro_set_environment declares its options, before
+        // retro_init applies the latch-once core settings.
+        let defaults = UserDefaults.standard
+        let options: [(String, String)] = [
+            ("eden_resolution", defaults.string(forKey: "eden_resolution") ?? "0.5x"),
+            ("eden_use_docked", defaults.string(forKey: "eden_use_docked") ?? "No"),
+            ("eden_multi_core", defaults.string(forKey: "eden_multi_core") ?? "Disabled"),
+            ("eden_async_gpu", defaults.string(forKey: "eden_async_gpu") ?? "Disabled"),
+            ("eden_memory_layout", defaults.string(forKey: "eden_memory_layout") ?? "4GB"),
+            ("eden_speed_limit", defaults.string(forKey: "eden_speed_limit") ?? "Enabled"),
+        ]
+        let optionsAccepted = options.allSatisfy { option in
+            option.0.withCString { keyPointer in
+                option.1.withCString { valuePointer in
+                    eden_bridge_set_option(keyPointer, valuePointer)
+                }
+            }
+        }
+        guard optionsAccepted else {
+            let message = "Saved core settings were invalid; review Settings and try again."
+            phase = .failed(message)
+            status = message
+            releaseScope()
+            pendingGame = nil
+            return
+        }
 
         let started = game.url.path.withCString { rom in
             EdenPaths.dataRootPath.withCString { root in
@@ -169,10 +208,16 @@ final class EmulatorSession: ObservableObject {
                 self.status = self.readStatus()
                 self.currentGame = nil
                 self.pendingGame = nil
-                self.iterationsPerSecond = 0
+                self.framesPerSecond = nil
+                self.noNewFrames = false
+                self.isPaused = false
                 UIApplication.shared.isIdleTimerDisabled = false
             }
         }
+    }
+
+    func togglePause() {
+        eden_bridge_set_paused(!isPaused)
     }
 
     private func releaseScope() {
@@ -204,11 +249,24 @@ final class EmulatorSession: ObservableObject {
 
     private func refresh() {
         status = readStatus()
-        iterationsPerSecond = eden_bridge_iterations_per_second()
+        let pausedNow = eden_bridge_is_paused()
+        if pausedNow != isPaused {
+            lastFrameSampleDate = nil
+            lastNewFrameDate = nil
+            framesPerSecond = nil
+            noNewFrames = false
+        }
+        isPaused = pausedNow
 
         switch eden_bridge_state() {
         case EdenBridgeStateRunning:
             phase = .running
+            if isPaused {
+                framesPerSecond = nil
+                noNewFrames = false
+            } else {
+                refreshPresentedFrameRate()
+            }
         case EdenBridgeStateStarting:
             phase = .starting
         case EdenBridgeStateStopping:
@@ -235,19 +293,47 @@ final class EmulatorSession: ObservableObject {
         }
     }
 
+    private func refreshPresentedFrameRate() {
+        let now = Date()
+        let count = UInt64(eden_bridge_presented_frame_count())
+        if lastFrameSampleDate == nil {
+            lastPresentedFrameCount = count
+            lastFrameSampleDate = now
+            lastNewFrameDate = now
+            return
+        }
+        guard count >= lastPresentedFrameCount else {
+            // retro_init resets the core's per-session counter.
+            lastPresentedFrameCount = count
+            lastFrameSampleDate = now
+            lastNewFrameDate = nil
+            framesPerSecond = nil
+            noNewFrames = false
+            return
+        }
+
+        let delta = count - lastPresentedFrameCount
+        if let sampleDate = lastFrameSampleDate, delta > 0 {
+            let elapsed = now.timeIntervalSince(sampleDate)
+            if elapsed > 0 { framesPerSecond = Double(delta) / elapsed }
+        }
+        if delta > 0 {
+            lastNewFrameDate = now
+            noNewFrames = false
+        } else if let lastNewFrameDate {
+            noNewFrames = now.timeIntervalSince(lastNewFrameDate) >= 3
+            if noNewFrames { framesPerSecond = nil }
+        } else if let sampleDate = lastFrameSampleDate {
+            noNewFrames = now.timeIntervalSince(sampleDate) >= 3
+        }
+        lastPresentedFrameCount = count
+        lastFrameSampleDate = now
+    }
+
     private func readStatus() -> String {
         var buffer = [CChar](repeating: 0, count: 512)
         eden_bridge_copy_status(&buffer, buffer.count)
         return String(cString: buffer)
     }
 
-    /// Frames-per-second text for the HUD, with the caveat spelled out.
-    ///
-    /// This is FRONTEND ITERATIONS, not guest frames. retro_run returns either when a
-    /// frame is presented or when kFrameWaitTimeout (50 ms, retro_core.cpp:132)
-    /// elapses, so a completely stalled guest still reports 20. Labelling it "fps"
-    /// without that caveat would make a hung emulator look like a slow one.
-    var rateDescription: String {
-        String(format: "%.0f it/s", iterationsPerSecond)
-    }
 }

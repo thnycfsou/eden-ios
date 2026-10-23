@@ -76,6 +76,9 @@ public:
     /// Called from GPU thread when a frame is displayed.
     virtual void OnFrameDisplayed() {}
 
+    /// Called when the renderer has queued a new frame for presentation.
+    virtual void OnFramePresented() {}
+
     /**
      * Returns a GraphicsContext that the frontend provides to be used for rendering.
      */

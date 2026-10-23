@@ -8,6 +8,7 @@
 
 #include "common/logging.h" // Eden has no src/common/logging/ - it is one header
 #include "core/frontend/graphics_context.h"
+#include "libretro_core/eden_libretro.h"
 #include "libretro_core/retro_emu_window.h"
 
 namespace LibretroCore {
@@ -73,12 +74,17 @@ bool RetroEmuWindow::IsShown() const {
 }
 
 void RetroEmuWindow::OnFrameDisplayed() {
-    presented_frames.fetch_add(1, std::memory_order_relaxed);
     {
         std::lock_guard lock{frame_mutex};
         ++frame_sequence;
     }
     frame_cv.notify_all();
+}
+
+void RetroEmuWindow::OnFramePresented() {
+    if (!IsShown()) return;
+    presented_frames.fetch_add(1, std::memory_order_relaxed);
+    eden_libretro_note_frame_presented();
 }
 
 bool RetroEmuWindow::WaitForFramePresented(std::chrono::milliseconds timeout) {

@@ -113,6 +113,8 @@ std::string g_data_root_override;
 
 namespace {
 
+std::atomic<std::uint64_t> g_presented_frame_count{0};
+
 // Keep a small crash-surviving trace in the app's data root. This is deliberately
 // independent of Common::Log's buffered backend so an abort during Core::System::Load
 // still leaves the last completed boundary on disk.
@@ -417,6 +419,23 @@ bool LoadGameInternal(const std::string& path) {
 
 } // namespace
 
+extern "C" EDEN_LIBRETRO_API void eden_libretro_note_frame_presented(void) {
+    g_presented_frame_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+extern "C" EDEN_LIBRETRO_API std::uint64_t eden_libretro_presented_frame_count(void) {
+    return g_presented_frame_count.load(std::memory_order_relaxed);
+}
+
+extern "C" EDEN_LIBRETRO_API void eden_libretro_set_paused(bool paused) {
+    if (!LibretroCore::g_system) return;
+    if (paused) {
+        LibretroCore::g_system->Pause();
+    } else {
+        LibretroCore::g_system->Run();
+    }
+}
+
 extern "C" {
 
 RETRO_API unsigned retro_api_version() {
@@ -513,6 +532,7 @@ RETRO_API void retro_set_controller_port_device(unsigned port, unsigned device) 
 }
 
 RETRO_API void retro_init() {
+    g_presented_frame_count.store(0, std::memory_order_relaxed);
     // Paths before logging, deliberately. Common::Log::Initialize() resolves
     // GetEdenPath(EdenPath::LogDir) once and hands it to the file backend by value, and
     // a second Initialize() early-returns - so the log file cannot be re-pointed later.

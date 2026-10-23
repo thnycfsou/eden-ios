@@ -51,6 +51,9 @@ public:
     /// must never call back into libretro.
     void OnFrameDisplayed() override;
 
+    /// Counts a newly rendered frame after it has been queued for presentation.
+    void OnFramePresented() override;
+
     /// Blocks until the next OnFrameDisplayed(), or until the timeout expires.
     /// Returns true if a frame arrived. This is how retro_run returns at guest cadence:
     /// Core::System::Run() (src/core/core.h:168) is not a step function - its whole body

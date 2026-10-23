@@ -18,6 +18,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/div_ceil.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "core/device_memory.h"
@@ -210,7 +211,10 @@ void DeviceMemoryManager<Traits>::Map(DAddr address, VAddr virtual_address, size
     size_t num_pages = Common::AlignUp(size, Memory::YUZU_PAGESIZE) >> Memory::YUZU_PAGEBITS;
     std::scoped_lock lk(mapping_guard);
 
-    tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
+    if (!tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages)) {
+        LOG_CRITICAL(HW_Memory, "Failed to commit device-memory mapping metadata");
+        return;
+    }
     for (size_t i = 0; i < num_pages; i++) {
         const VAddr new_vaddress = virtual_address + i * Memory::YUZU_PAGESIZE;
         auto* ptr = process_memory->GetPointerSilent(Common::ProcessAddress(new_vaddress));
@@ -247,7 +251,10 @@ void DeviceMemoryManager<Traits>::Unmap(DAddr address, size_t size) {
     device_inter->InvalidateRegion(address, size);
     std::scoped_lock lk(mapping_guard);
 
-    tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages); // should already be committed, but just in case
+    if (!tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages)) {
+        LOG_CRITICAL(HW_Memory, "Failed to commit device-memory unmapping metadata");
+        return;
+    }
     for (size_t i = 0; i < num_pages; i++) {
         auto& entry = tracked_entries.GetUnchecked(start_page_d + i);
         auto phys_addr = entry.compressed_physical_ptr;
@@ -279,7 +286,10 @@ void DeviceMemoryManager<Traits>::TrackContinuityImpl(DAddr address, VAddr virtu
     uintptr_t last_ptr = 0;
     size_t page_count = 1;
 
-    tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages);
+    if (!tracked_entries.CommitRegion(start_page_d, start_page_d + num_pages)) {
+        LOG_CRITICAL(HW_Memory, "Failed to commit device-memory continuity metadata");
+        return;
+    }
     for (size_t i = num_pages; i > 0; i--) {
         size_t index = i - 1;
         const VAddr new_vaddress = virtual_address + index * Memory::YUZU_PAGESIZE;

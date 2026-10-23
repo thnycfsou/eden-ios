@@ -250,12 +250,14 @@ void RendererVulkan::Composite(std::span<const Tegra::FramebufferConfig> framebu
         frame_gen.GenerateInto(device, generated, generation);
         scheduler.Flush(*generated->render_ready);
         present_manager.Present(generated);
+        render_window.OnFramePresented();
     }
 #endif
 
     scheduler.Flush(*frame->render_ready);
 
     present_manager.Present(frame);
+    render_window.OnFramePresented();
 #ifdef HAS_LSFG
     scheduler.DispatchWork();
 #endif
