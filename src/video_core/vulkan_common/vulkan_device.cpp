@@ -1022,6 +1022,25 @@ bool Device::GetSuitability(bool requires_swapchain) {
         supported_extensions.insert(property.extensionName);
     }
 
+    // MoltenVK's driver ID is obtained from VkPhysicalDeviceDriverProperties. Query it
+    // before feature policy below calls IsMoltenVK(); the later full properties query
+    // is too late to classify missing mandatory features correctly.
+    if (instance_version >= VK_API_VERSION_1_2 ||
+        supported_extensions.contains(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME)) {
+        VkPhysicalDeviceDriverProperties driver_properties{};
+        driver_properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES;
+        VkPhysicalDeviceProperties2 driver_properties2{};
+        driver_properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        driver_properties2.pNext = &driver_properties;
+        physical.GetProperties2(driver_properties2);
+        properties.driver = driver_properties;
+        LOG_INFO(Render_Vulkan, "Vulkan driver identified before feature checks: {} (id={})",
+                 properties.driver.driverName, properties.driver.driverID);
+    } else {
+        LOG_WARNING(Render_Vulkan,
+                    "VK_KHR_driver_properties unavailable; driver-specific feature policy is disabled");
+    }
+
     // Generate list of extensions to load.
     loaded_extensions.clear();
 
@@ -1135,6 +1154,14 @@ bool Device::GetSuitability(bool requires_swapchain) {
         FOR_EACH_VK_FEATURE_1_3(EXT_FEATURE);
     }
 
+#ifdef VK_KHR_portability_subset
+    if (extensions.portability_subset) {
+        features.portability_subset.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR;
+        SetNext(next, features.portability_subset);
+    }
+#endif
+
 #undef EXT_FEATURE
 #undef FEATURE
 
@@ -1151,7 +1178,10 @@ bool Device::GetSuitability(bool requires_swapchain) {
                             strcmp(#name, "logicOp") == 0 ||                                       \
                             strcmp(#name, "shaderCullDistance") == 0 ||                            \
                             strcmp(#name, "wideLines") == 0)) {                                    \
-            LOG_INFO(Render_Vulkan, "MoltenVK missing feature {} - using fallback", #name);       \
+            LOG_WARNING(Render_Vulkan,                                                             \
+                        "MoltenVK lacks required feature {}; it remains disabled and affected "    \
+                        "game pipelines may fail", #name);                                        \
+            suitable = false;                                                                       \
         } else {                                                                                    \
             LOG_ERROR(Render_Vulkan, "Missing required feature {}", #name);                        \
             suitable = false;                                                                       \
@@ -1229,9 +1259,24 @@ bool Device::GetSuitability(bool requires_swapchain) {
             VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_PROPERTIES_EXT;
         SetNext(next, properties.custom_border_color);
     }
+#ifdef VK_KHR_portability_subset
+    if (extensions.portability_subset) {
+        properties.portability_subset.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_PROPERTIES_KHR;
+        SetNext(next, properties.portability_subset);
+    }
+#endif
 
     // Perform the property fetch.
     physical.GetProperties2(properties2);
+
+#ifdef VK_KHR_portability_subset
+    if (extensions.portability_subset) {
+        LOG_INFO(Render_Vulkan,
+                 "VK_KHR_portability_subset enabled; min vertex binding stride alignment={}",
+                 properties.portability_subset.minVertexInputBindingStrideAlignment);
+    }
+#endif
 
     // Store base properties
     properties.properties = properties2.properties;

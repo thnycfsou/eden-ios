@@ -270,6 +270,13 @@ add_library(video_core STATIC
     video_core.h
 )
 
+# MoltenVK exposes VK_KHR_portability_subset through Vulkan-Headers' beta header.
+# The macro must be consistent for video_core and consumers that include its public
+# Vulkan device types.
+if(APPLE)
+    target_compile_definitions(video_core PUBLIC VK_ENABLE_BETA_EXTENSIONS)
+endif()
+
 if (ENABLE_LSFG)
     target_sources(video_core PRIVATE
         frame_gen/lossless_dll.cpp

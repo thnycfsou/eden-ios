@@ -16,6 +16,9 @@
 #include <utility>
 #include <vector>
 #include <vulkan/vulkan_core.h>
+#ifdef VK_ENABLE_BETA_EXTENSIONS
+#include <vulkan/vulkan_beta.h>
+#endif
 #include <string>
 
 #include "common/common_types.h"

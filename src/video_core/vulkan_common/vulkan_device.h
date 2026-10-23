@@ -109,6 +109,7 @@ VK_DEFINE_HANDLE(VmaAllocator)
     EXTENSION(KHR, MAINTENANCE_3, maintenance3)                                                    \
     EXTENSION(KHR, MAINTENANCE_7, maintenance7)                                                    \
     EXTENSION(KHR, MAINTENANCE_8, maintenance8)                                                    \
+    EXTENSION(KHR, PORTABILITY_SUBSET, portability_subset)                                         \
     EXTENSION(NV, DEVICE_DIAGNOSTICS_CONFIG, device_diagnostics_config)                            \
     EXTENSION(NV, GEOMETRY_SHADER_PASSTHROUGH, geometry_shader_passthrough)                        \
     EXTENSION(NV, VIEWPORT_ARRAY2, viewport_array2)                                                \
@@ -1180,6 +1181,10 @@ private:
         FOR_EACH_VK_FEATURE_1_4(FEATURE_CORE);
         FOR_EACH_VK_FEATURE_EXT(FEATURE_EXT);
 
+#ifdef VK_KHR_portability_subset
+        VkPhysicalDevicePortabilitySubsetFeaturesKHR portability_subset{};
+#endif
+
 #undef FEATURE_CORE
 #undef FEATURE_EXT
 
@@ -1197,6 +1202,9 @@ private:
         VkPhysicalDeviceMaintenance5PropertiesKHR maintenance5{};
         VkPhysicalDeviceDepthStencilResolveProperties depth_stencil_resolve{};
         VkPhysicalDeviceCustomBorderColorPropertiesEXT custom_border_color{};
+#ifdef VK_KHR_portability_subset
+        VkPhysicalDevicePortabilitySubsetPropertiesKHR portability_subset{};
+#endif
 
         VkPhysicalDeviceProperties properties{};
     };

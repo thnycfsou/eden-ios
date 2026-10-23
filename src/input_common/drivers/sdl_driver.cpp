@@ -5,6 +5,12 @@
 
 #include <array>
 #include <numbers>
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#include <SDL3/SDL_main.h>
+#endif
 #include "common/logging.h"
 #include "common/math_util.h"
 #include "common/param_package.h"
@@ -641,6 +647,11 @@ void SDLDriver::CloseJoysticks() {
 }
 
 SDLDriver::SDLDriver(std::string input_engine_) : InputEngine(std::move(input_engine_)) {
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    // Eden is hosted by SwiftUI rather than SDL_main on iOS. SDL3 otherwise rejects
+    // SDL_Init with its "did you include SDL_main.h" readiness error.
+    SDL_SetMainReady();
+#endif
     // Set our application name. Currently passed to DBus by SDL and visible to the user through
     // their desktop environment.
     SDL_SetHint(SDL_HINT_APP_NAME, "Eden");

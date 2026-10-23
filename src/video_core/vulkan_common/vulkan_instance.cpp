@@ -22,13 +22,15 @@
 namespace Vulkan {
 namespace {
 
-[[nodiscard]] bool AreExtensionsSupported(const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties, std::span<const char* const> extensions) {
+[[nodiscard]] bool AreExtensionsSupported(const vk::InstanceDispatch& dld, std::vector<VkExtensionProperties> const& properties, std::span<const char* const> extensions, bool required = true) {
     for (const char* extension : extensions) {
         const auto it = std::ranges::find_if(properties, [extension](const auto& prop) {
             return std::strcmp(extension, prop.extensionName) == 0;
         });
         if (it == properties.end()) {
-            LOG_ERROR(Render_Vulkan, "Required instance extension {} is not available", extension);
+            if (required) {
+                LOG_ERROR(Render_Vulkan, "Required instance extension {} is not available", extension);
+            }
             return false;
         }
     }
@@ -77,10 +79,10 @@ namespace {
     // Probe optional extensions against the same snapshot the caller verifies against, so the
     // check here and the verification in CreateInstance can never disagree (see TOCTOU note below).
 #ifdef __APPLE__
-    if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}))
+    if (AreExtensionsSupported(dld, properties, std::array{VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME}, false))
         extensions.push_back(VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME);
 #endif
-    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}))
+    if (enable_validation && AreExtensionsSupported(dld, properties, std::array{VK_EXT_DEBUG_UTILS_EXTENSION_NAME}, false))
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     return extensions;
 }

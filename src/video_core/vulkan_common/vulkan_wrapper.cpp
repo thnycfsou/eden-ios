@@ -5,6 +5,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -455,11 +456,13 @@ VkResult Free(VkDevice device, VkCommandPool handle, Span<VkCommandBuffer> buffe
 
 Instance Instance::Create(u32 version, Span<const char*> layers, Span<const char*> extensions,
                           InstanceDispatch& dispatch) {
-#ifdef __APPLE__
-    constexpr VkFlags ci_flags{VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR};
-#else
-    constexpr VkFlags ci_flags{};
-#endif
+    const bool portability_enumeration_enabled =
+        std::ranges::any_of(extensions, [](const char* extension) {
+            return std::strcmp(extension, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0;
+        });
+    const VkFlags ci_flags = portability_enumeration_enabled
+                                 ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR
+                                 : VkFlags{};
     // DO NOT TOUCH OR CHANGE THE ENGINE NAME/APPLICATION NAME, breaks RNDA3!!
     // AMD drivers have fixes for Yuzu
     // if remove => gloom + yellow line glitch appears
@@ -688,7 +691,11 @@ Device Device::Create(VkPhysicalDevice physical_device, Span<VkDeviceQueueCreate
         .pEnabledFeatures = nullptr,
     };
     VkDevice device;
-    Check(dispatch.vkCreateDevice(physical_device, &ci, nullptr, &device));
+    const VkResult result = dispatch.vkCreateDevice(physical_device, &ci, nullptr, &device);
+    if (result != VK_SUCCESS) {
+        LOG_ERROR(Render_Vulkan, "vkCreateDevice returned {}", string_VkResult(result));
+        throw vk::Exception(result);
+    }
     Load(device, dispatch);
     return Device(device, dispatch);
 }
