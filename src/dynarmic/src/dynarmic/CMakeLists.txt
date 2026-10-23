@@ -212,6 +212,8 @@ if ("arm64" IN_LIST ARCHITECTURE)
         backend/arm64/abi.h
         backend/arm64/address_space.cpp
         backend/arm64/address_space.h
+        backend/arm64/stikjit_arena.hpp
+        backend/arm64/stikjit_arena.cpp
         backend/arm64/devirtualize.h
         backend/arm64/emit_arm64.cpp
         backend/arm64/emit_arm64.h

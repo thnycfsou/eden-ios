@@ -12,7 +12,13 @@
 #include <optional>
 
 #include "common/common_types.h"
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 #include <oaknut/code_block.hpp>
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+#include "dynarmic/backend/arm64/stikjit_arena.hpp"
+#endif
 #include <oaknut/oaknut.hpp>
 #include "common/container/unordered_map.h"
 #include "common/container/unordered_set.h"
@@ -71,7 +77,11 @@ protected:
 
     IR::Block ir_block;
     const std::size_t code_cache_size;
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    StikJIT::CodeBlock mem;
+#else
     oaknut::CodeBlock mem;
+#endif
     oaknut::CodeGenerator code;
 
     // A IR::LocationDescriptor will have one current CodePtr.

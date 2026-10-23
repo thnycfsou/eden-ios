@@ -11,6 +11,9 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include "common/common_types.h"
 
@@ -65,7 +68,11 @@ public:
 #if defined(ARCHITECTURE_x86_64)
     void Register(X64::BlockOfCode& code);
 #elif defined(ARCHITECTURE_arm64)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+    void Register(void* executable_mem, std::size_t mem_size);
+#else
     void Register(oaknut::CodeBlock& mem, std::size_t mem_size);
+#endif
 #elif defined(ARCHITECTURE_riscv64)
     void Register(RV64::CodeBlock& mem, std::size_t mem_size);
 #elif defined(ARCHITECTURE_loongarch64)

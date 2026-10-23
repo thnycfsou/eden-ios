@@ -38,17 +38,16 @@ enum JITStatus: Equatable, Identifiable {
     var permitsEmulation: Bool { self != .unavailable }
 
     static func current() -> JITStatus {
-        switch eden_jit_report().verdict {
-        case EdenJITViaEntitlement: return .viaEntitlement
-        case EdenJITViaDebugger:    return .viaDebugger
-        default:                    return .unavailable
-        }
+        // Stage 3 iOS backend always requires the RX/RW executable arena.
+        // CS_DEBUGGED, entitlements and successful mmap calls do not prove it exists.
+        // Never start the emulator until the universal.js preparation completes.
+        return eden_stikjit_arena_ready() ? .viaDebugger : .unavailable
     }
 
     var headline: String {
         switch self {
         case .viaEntitlement: return "JIT is available"
-        case .viaDebugger:    return "JIT is available for this launch"
+        case .viaDebugger:    return "StikJIT memory prepared (ARM64 not tested)"
         case .unavailable:    return "Eden cannot run without JIT"
         }
     }
@@ -69,11 +68,9 @@ enum JITStatus: Equatable, Identifiable {
 
         case .viaDebugger:
             return """
-            A debugger is attached, which sets CS_DEBUGGED and lets the recompiler make \
-            memory executable.
-
-            This lasts only until the app is force-quit. The next launch has to go \
-            through the same tool again, or JIT will be gone and games will not start.
+            The universal.js breakpoint protocol prepared a 256 MiB executable region
+            and the writable alias. ARM64 execution has NOT yet been verified on this iOS.
+            The next test is launching a homebrew/game; an execution fault remains possible.
             """
 
         case .unavailable:
@@ -141,10 +138,26 @@ final class JITAvailability: ObservableObject {
 
     @Published private(set) var status: JITStatus
     @Published private(set) var diagnostics: String
+    @Published private(set) var preparingStikJIT = false
 
     init() {
         status = JITStatus.current()
         diagnostics = JITAvailability.readDiagnostics()
+    }
+
+    func prepareStikJIT() {
+        guard !preparingStikJIT else { return }
+        preparingStikJIT = true
+        // Explicit user action only. StikDebug MUST be running universal.js.
+        // This method can block while the debugger prepares every 16 KiB page.
+        Task.detached(priority: .userInitiated) {
+            _ = eden_stikjit_prepare_arena()
+            await MainActor.run {
+                self.preparingStikJIT = false
+                self.status = JITStatus.current()
+                self.diagnostics = JITAvailability.readDiagnostics()
+            }
+        }
     }
 
     func recheck() {
@@ -152,7 +165,7 @@ final class JITAvailability: ObservableObject {
         // happens once emulation starts. Probing on a timer is deliberately not offered:
         // Apple documents an arm64 process as having a single JIT region and it is
         // unverified whether a released probe mapping frees it cleanly.
-        _ = eden_jit_probe()
+        if !eden_stikjit_arena_ready() { _ = eden_jit_probe() }
         status = JITStatus.current()
         diagnostics = JITAvailability.readDiagnostics()
     }
@@ -160,7 +173,7 @@ final class JITAvailability: ObservableObject {
     private static func readDiagnostics() -> String {
         var buffer = [CChar](repeating: 0, count: 2048)
         eden_jit_copy_diagnostics(&buffer, buffer.count)
-        return String(cString: buffer)
+        return String(cString: eden_stikjit_status()) + "\n\n" + String(cString: buffer)
     }
 }
 
@@ -203,6 +216,18 @@ struct JITRequiredView: View {
                         .background(Color.secondary.opacity(0.12))
                         .cornerRadius(10)
                     }
+
+                    Text("Experimental: first select universal.js in StikDebug, attach it to Eden, then return here. Without the active script a breakpoint can crash Eden.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+
+                    Button {
+                        jit.prepareStikJIT()
+                    } label: {
+                        Text(jit.preparingStikJIT ? "Preparing executable arena..." : "Prepare StikJIT RX/RW")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(jit.preparingStikJIT || eden_stikjit_arena_ready())
 
                     HStack {
                         Button {

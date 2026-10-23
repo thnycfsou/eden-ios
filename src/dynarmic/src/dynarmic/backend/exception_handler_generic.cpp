@@ -21,7 +21,11 @@ void ExceptionHandler::Register(X64::BlockOfCode&) {
     // Do nothing
 }
 #elif defined(ARCHITECTURE_arm64)
+#if defined(__APPLE__) && TARGET_OS_IPHONE
+void ExceptionHandler::Register(void*, std::size_t) {
+#else
 void ExceptionHandler::Register(oaknut::CodeBlock&, std::size_t) {
+#endif
     // Do nothing
 }
 #elif defined(ARCHITECTURE_riscv64)

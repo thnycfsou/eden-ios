@@ -135,6 +135,13 @@ void eden_jit_lock_verdict(void);
 /// "Copy diagnostics" button. Writes at most `len` bytes including the terminator.
 void eden_jit_copy_diagnostics(char *buf, size_t len);
 
+// Experimental StikDebug universal.js / dual-memory JIT arena.
+// Explicitly call only AFTER universal.js has attached and is servicing BRK.
+// CS_DEBUGGED alone is NOT proof that the script is waiting.
+bool eden_stikjit_prepare_arena(void);
+bool eden_stikjit_arena_ready(void);
+const char* eden_stikjit_status(void);
+
 // The literal entitlement keys the probe looks for. If src/ios/*.entitlements ever
 // uses different names, change these too or the probe reports "no entitlement" for a
 // build that has one.
