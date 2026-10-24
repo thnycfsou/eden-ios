@@ -277,10 +277,9 @@ final class EmulatorSession: ObservableObject {
             releaseScope()
             UIApplication.shared.isIdleTimerDisabled = false
         case EdenBridgeStateIdle:
-            // The core asked to shut down on its own - RETRO_ENVIRONMENT_SHUTDOWN,
-            // raised either by the exit callback registered at load
-            // (retro_core.cpp:317-323) or by the GetExitRequested poll in retro_run
-            // (retro_core.cpp:558-560).
+            // The emulation thread finished cleanup after a core shutdown callback
+            // or an explicit frontend stop. The bridge status retains the classified
+            // reason for the termination.
             if phase != .idle {
                 phase = .idle
                 releaseScope()

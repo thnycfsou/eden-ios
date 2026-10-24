@@ -57,18 +57,19 @@ private:
         vk::Buffer buffer;
         VkDeviceAddress device_address;
         std::span<u8> mapped_span;
+        VkDeviceSize capacity;
         MemoryUsage usage;
         u32 log2_level;
         u64 index;
         u64 tick = 0;
         bool deferred{};
 
-        StagingBufferRef Ref() const noexcept {
+        StagingBufferRef Ref(size_t requested_size) const noexcept {
             return {
                 .buffer = *buffer,
                 .device_address = device_address,
                 .offset = 0,
-                .mapped_span = mapped_span,
+                .mapped_span = mapped_span.first(requested_size),
                 .usage = usage,
                 .log2_level = log2_level,
                 .index = index,
@@ -101,6 +102,7 @@ private:
     void ReleaseCache(MemoryUsage usage);
 
     void ReleaseLevel(StagingBuffersCache& cache, size_t log2);
+    bool ReclaimCompletedUploadBuffers();
     size_t Region(size_t iter) const noexcept {
         return iter / region_size;
     }

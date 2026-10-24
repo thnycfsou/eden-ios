@@ -5,10 +5,13 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
-#include <bit>
 #include <limits>
 #include <utility>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 #include <fmt/ranges.h>
 
@@ -19,6 +22,7 @@
 #include "common/literals.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_staging_buffer_pool.h"
+#include "video_core/renderer_vulkan/vk_staging_buffer_pool_utils.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
 
@@ -35,7 +39,11 @@ constexpr VkDeviceSize MAX_ALIGNMENT = 256;
 // Windows ones however, can intake bigger buffers and generally do not OOM.
 // - GTX 960 on Windows will not OOM with 256mib
 // - GT 1030 on ^NIX will OOM with 256mib
-#if defined(__FreeBSD__)
+#if defined(__APPLE__) && TARGET_OS_IPHONE && \
+    (!defined(TARGET_OS_MACCATALYST) || !TARGET_OS_MACCATALYST)
+// Keep the permanently resident upload ring bounded on Apple mobile devices.
+constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 64_MiB;
+#elif defined(__FreeBSD__)
 constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 128_MiB;
 #else
 constexpr VkDeviceSize MAX_STREAM_BUFFER_SIZE = 256_MiB;
@@ -191,8 +199,9 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
                                                                         bool deferred) {
     StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
 
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    const auto is_free = [this, size](const StagingBuffer& entry) {
+        return StagingBufferPoolUtils::CanReuseAllocation(entry.capacity, size) &&
+               !entry.deferred && scheduler.IsFree(entry.tick);
     };
     auto& entries = cache_level.entries;
     const auto hint_it = entries.begin() + cache_level.iterate_index;
@@ -207,23 +216,28 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
     it->tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick();
     ASSERT(!it->deferred);
     it->deferred = deferred;
-    return it->Ref();
+    return it->Ref(size);
 }
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred) {
     // Keep the rounded allocation representable both by VkDeviceSize and by the
     // cache-level array. In particular, do not truncate large size_t requests to u32.
-    const size_t rounded_log2 = size > 1 ? std::bit_width(size - 1) : 0;
-    if (rounded_log2 >= NUM_LEVELS || rounded_log2 >= std::numeric_limits<VkDeviceSize>::digits) {
+    const size_t allocation_size =
+        StagingBufferPoolUtils::AlignAllocationSize(size, MAX_ALIGNMENT);
+    if (allocation_size == 0 ||
+        allocation_size > static_cast<size_t>(std::numeric_limits<VkDeviceSize>::max())) {
         throw vk::Exception{VK_ERROR_OUT_OF_DEVICE_MEMORY};
     }
-    const auto log2_size = static_cast<u32>(rounded_log2);
-    const VkDeviceSize allocation_size = VkDeviceSize{1} << log2_size;
+    const size_t cache_level = Common::Log2Ceil(size);
+    if (cache_level >= NUM_LEVELS || cache_level >= std::numeric_limits<VkDeviceSize>::digits) {
+        throw vk::Exception{VK_ERROR_OUT_OF_DEVICE_MEMORY};
+    }
+    const auto log2_size = static_cast<u32>(cache_level);
     VkBufferCreateInfo buffer_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = allocation_size,
+        .size = static_cast<VkDeviceSize>(allocation_size),
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -237,7 +251,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer = [&] {
+    const auto create_buffer = [&] {
         try {
             return memory_allocator.CreateBuffer(buffer_ci, usage);
         } catch (const vk::Exception& exception) {
@@ -245,6 +259,20 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
                       "Staging buffer allocation failed: requested={} rounded={} usage={} VkResult={}",
                       size, allocation_size, static_cast<u32>(usage), exception.GetResult());
             throw;
+        }
+    };
+    vk::Buffer buffer = [&] {
+        try {
+            return create_buffer();
+        } catch (const vk::Exception& exception) {
+            if (usage != MemoryUsage::Upload ||
+                exception.GetResult() != VK_ERROR_OUT_OF_DEVICE_MEMORY ||
+                !ReclaimCompletedUploadBuffers()) {
+                throw;
+            }
+            // Only completed, non-deferred buffers were reclaimed; do not wait here because
+            // Request can run while the scheduler is recording a command buffer.
+            return create_buffer();
         }
     }();
     if (device.HasDebuggingToolAttached()) {
@@ -260,13 +288,33 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .buffer = std::move(buffer),
         .device_address = buffer_address,
         .mapped_span = mapped_span,
+        .capacity = allocation_size,
         .usage = usage,
         .log2_level = log2_size,
         .index = unique_ids++,
         .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
         .deferred = deferred,
     });
-    return entry.Ref();
+    return entry.Ref(size);
+}
+
+bool StagingBufferPool::ReclaimCompletedUploadBuffers() {
+    bool reclaimed{};
+    for (StagingBuffers& level : upload_cache) {
+        const auto is_reclaimable = [this](const StagingBuffer& entry) {
+            return !entry.deferred && scheduler.IsFree(entry.tick);
+        };
+        const auto old_size = level.entries.size();
+        level.entries.erase(
+            std::remove_if(level.entries.begin(), level.entries.end(), is_reclaimable),
+            level.entries.end());
+        reclaimed |= level.entries.size() != old_size;
+        if (level.entries.size() != old_size) {
+            level.delete_index = 0;
+            level.iterate_index = 0;
+        }
+    }
+    return reclaimed;
 }
 
 StagingBufferPool::StagingBuffersCache& StagingBufferPool::GetCache(MemoryUsage usage) {

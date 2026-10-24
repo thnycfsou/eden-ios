@@ -10,6 +10,7 @@
 #include <iostream>
 #include <memory>
 #include <span>
+#include <string_view>
 #include <thread>
 #include <vector>
 #include <bit>
@@ -911,6 +912,16 @@ std::unique_ptr<GraphicsPipeline> PipelineCache::CreateGraphicsPipeline(
 
 } catch (const Shader::Exception& exception) {
     auto hash = key.Hash();
+    if (std::string_view{exception.what()} == "Geometry streams") {
+        LOG_ERROR(Render_Vulkan, "Geometry stream shader translation unsupported: pipeline={:016x}",
+                  hash);
+        for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
+            if (key.unique_hashes[index] != 0) {
+                LOG_ERROR(Render_Vulkan, "Geometry stream pipeline stage={} shader={:016x}",
+                          index, key.unique_hashes[index]);
+            }
+        }
+    }
     size_t env_index{0};
     for (size_t index = 0; index < Maxwell::MaxShaderProgram; ++index) {
         if (key.unique_hashes[index] == 0) {

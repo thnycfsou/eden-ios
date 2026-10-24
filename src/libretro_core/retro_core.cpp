@@ -114,6 +114,7 @@ std::string g_data_root_override;
 namespace {
 
 std::atomic<std::uint64_t> g_presented_frame_count{0};
+std::atomic<EdenLibretroExitReason> g_exit_reason{EdenLibretroExitReasonUnknown};
 
 // Keep a small crash-surviving trace in the app's data root. This is deliberately
 // independent of Common::Log's buffered backend so an abort during Core::System::Load
@@ -398,6 +399,9 @@ bool LoadGameInternal(const std::string& path) {
     g_system->RegisterExitCallback([] { // core.h:440
         // Fires on a GUEST thread. Only raise a flag / notify the frontend here -
         // never tear down Core::System from inside it.
+        eden_libretro_mark_exit_reason(
+            g_system->GPU().HasFatalError() ? EdenLibretroExitReasonGpuFatal
+                                            : EdenLibretroExitReasonGuestRequested);
         if (g_environ_cb != nullptr) {
             g_environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
         }
@@ -418,6 +422,22 @@ bool LoadGameInternal(const std::string& path) {
 }
 
 } // namespace
+
+extern "C" EDEN_LIBRETRO_API void eden_libretro_mark_exit_reason(EdenLibretroExitReason reason) {
+    if (reason == EdenLibretroExitReasonUnknown) {
+        return;
+    }
+    auto expected = EdenLibretroExitReasonUnknown;
+    g_exit_reason.compare_exchange_strong(expected, reason, std::memory_order_acq_rel);
+}
+
+extern "C" EDEN_LIBRETRO_API void eden_libretro_reset_exit_reason(void) {
+    g_exit_reason.store(EdenLibretroExitReasonUnknown, std::memory_order_release);
+}
+
+extern "C" EDEN_LIBRETRO_API EdenLibretroExitReason eden_libretro_exit_reason(void) {
+    return g_exit_reason.load(std::memory_order_acquire);
+}
 
 extern "C" EDEN_LIBRETRO_API void eden_libretro_note_frame_presented(void) {
     g_presented_frame_count.fetch_add(1, std::memory_order_relaxed);
@@ -615,6 +635,7 @@ RETRO_API void retro_deinit() {
 
 RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     if (!g_system || !g_emu_window || game == nullptr || game->path == nullptr) {
+        eden_libretro_mark_exit_reason(EdenLibretroExitReasonLoadFailure);
         LOG_CRITICAL(Frontend, "libretro: retro_load_game precondition failed");
         return false;
     }
@@ -623,6 +644,9 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
     LoadCheckpoint("libretro.retro_load_game.enter");
     try {
         const bool loaded = LoadGameInternal(g_game_path);
+        if (!loaded) {
+            eden_libretro_mark_exit_reason(EdenLibretroExitReasonLoadFailure);
+        }
         LoadCheckpoint(loaded ? "libretro.retro_load_game.success" :
                                 "libretro.retro_load_game.returned_false");
         LoadFailure(loaded ? "result" : "failure", loaded ? "success" : "loader returned false");
@@ -631,6 +655,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
         return loaded;
     } catch (const std::exception& exception) {
+        eden_libretro_mark_exit_reason(EdenLibretroExitReasonLoadFailure);
         LoadFailure("exception.std", exception.what());
         LOG_CRITICAL(Frontend, "libretro: exception escaped game load at {}: {}",
                      g_last_load_checkpoint, exception.what());
@@ -645,6 +670,7 @@ RETRO_API bool retro_load_game(const struct retro_game_info* game) {
         }
         return false;
     } catch (...) {
+        eden_libretro_mark_exit_reason(EdenLibretroExitReasonLoadFailure);
         LoadFailure("exception.unknown", "non-std exception escaped game load");
         LOG_CRITICAL(Frontend, "libretro: unknown exception escaped game load at {}",
                      g_last_load_checkpoint);
@@ -724,6 +750,7 @@ RETRO_API void retro_run() {
     // The guest asked to quit (System::Exit -> exit_requested, core.h:389). Polling it
     // here is the belt-and-braces path alongside the exit callback registered at load.
     if (g_system->GetExitRequested() && g_environ_cb != nullptr) {
+        eden_libretro_mark_exit_reason(EdenLibretroExitReasonGuestRequested);
         g_environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
     }
 

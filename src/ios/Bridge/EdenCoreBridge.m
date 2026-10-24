@@ -75,6 +75,7 @@ static struct {
     _Atomic bool shutdown_requested;  // RETRO_ENVIRONMENT_SHUTDOWN from the core
     pthread_t thread;
     bool thread_valid;
+    pthread_mutex_t lifecycle_mutex;
 
     // Parking the run loop while backgrounded. Not a pause of the emulated system -
     // see the note in the run loop.
@@ -131,10 +132,24 @@ static void EdenSetStatus(const char *fmt, ...) {
     EDEN_LOG("%{public}s", tmp);
 }
 
+static const char *EdenExitReasonText(EdenLibretroExitReason reason, bool core_shutdown) {
+    switch (reason) {
+    case EdenLibretroExitReasonGpuFatal: return "stopped after a fatal GPU error";
+    case EdenLibretroExitReasonGuestRequested: return "the game requested exit";
+    case EdenLibretroExitReasonUserRequested: return "stopped by the user";
+    case EdenLibretroExitReasonLoadFailure: return "game load failed";
+    case EdenLibretroExitReasonUnknown:
+    default:
+        return core_shutdown ? "core requested shutdown for an unknown reason"
+                             : "session ended for an unknown reason";
+    }
+}
+
 static void EdenBridgeInitOnce(void) {
     static dispatch_once_t once;
     dispatch_once(&once, ^{
         pthread_mutex_init(&g.status_mutex, NULL);
+        pthread_mutex_init(&g.lifecycle_mutex, NULL);
         pthread_mutex_init(&g.options_mutex, NULL);
         pthread_mutex_init(&g.gate_mutex, NULL);
         pthread_cond_init(&g.gate_cond, NULL);
@@ -592,6 +607,7 @@ static void *EdenEmulationThread(void *arg) {
             EdenSetStatus("failed to load. Check the log for the loader status; the "
                           "usual cause is missing or wrong prod.keys.");
         }
+        atomic_store(&g.should_run, false);
         atomic_store(&g.state, EdenBridgeStateFailed);
         retro_deinit();
         return NULL;
@@ -659,13 +675,16 @@ static void *EdenEmulationThread(void *arg) {
     retro_unload_game();
     retro_deinit();
 
-    atomic_store(&g.state, EdenBridgeStateIdle);
     atomic_store(&g.paused, false);
     atomic_store(&g.pause_requested, false);
     atomic_store(&g.ips, 0.0);
     // "%s" rather than passing the choice straight in, so -Wformat-security has
     // nothing to say about a non-literal format string.
-    EdenSetStatus("%s", atomic_load(&g.shutdown_requested) ? "the game exited" : "stopped");
+    EdenSetStatus("%s", EdenExitReasonText(eden_libretro_exit_reason(),
+                                            atomic_load(&g.shutdown_requested)));
+    // Publish Idle only after the final classified status so the SwiftUI poller
+    // cannot observe completion and stop polling before that reason becomes visible.
+    atomic_store(&g.state, EdenBridgeStateIdle);
     return NULL;
 }
 
@@ -711,21 +730,38 @@ void eden_bridge_set_visible(bool visible) {
 
 bool eden_bridge_start(const char *rom_path, const char *data_root) {
     EdenBridgeInitOnce();
+    pthread_mutex_lock(&g.lifecycle_mutex);
 
     int expected_state = EdenBridgeStateIdle;
     if (!atomic_compare_exchange_strong(&g.state, &expected_state,
                                         (int)EdenBridgeStateStarting)) {
         EdenSetStatus("a session is already running");
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return false;
+    }
+    // A core-requested shutdown sets the public state to Idle immediately before
+    // its emulation thread returns. Reap that completed pthread before replacing
+    // its handle with the next session's pthread_t.
+    if (g.thread_valid) {
+        const int join_rc = pthread_join(g.thread, NULL);
+        if (join_rc != 0) {
+            atomic_store(&g.state, EdenBridgeStateIdle);
+            EdenSetStatus("could not reap the previous emulation thread (errno %d)", join_rc);
+            pthread_mutex_unlock(&g.lifecycle_mutex);
+            return false;
+        }
+        g.thread_valid = false;
     }
     if (!eden_stikjit_arena_ready() || !eden_stikjit_execution_test_passed()) {
         EdenSetStatus("start refused: StikJIT arena has not passed the ARM64 RX execution test");
         atomic_store(&g.state, EdenBridgeStateIdle);
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return false;
     }
     if (rom_path == NULL || rom_path[0] == '\0' || data_root == NULL || data_root[0] == '\0') {
         EdenSetStatus("start refused: missing ROM path or data root");
         atomic_store(&g.state, EdenBridgeStateIdle);
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return false;
     }
     if (g.layer == NULL) {
@@ -737,6 +773,7 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
         // No thread or core resource was created; keep the bridge reusable after this
         // rejected attempt is dismissed by the frontend.
         atomic_store(&g.state, EdenBridgeStateIdle);
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return false;
     }
 
@@ -745,6 +782,7 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
 
     atomic_store(&g.should_run, true);
     atomic_store(&g.shutdown_requested, false);
+    eden_libretro_reset_exit_reason();
     atomic_store(&g.visible, true);
     atomic_store(&g.pause_requested, false);
     atomic_store(&g.paused, false);
@@ -775,20 +813,27 @@ bool eden_bridge_start(const char *rom_path, const char *data_root) {
         atomic_store(&g.should_run, false);
         atomic_store(&g.state, EdenBridgeStateIdle);
         EdenSetStatus("could not create the emulation thread (errno %d)", rc);
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return false;
     }
 
     g.thread_valid = true;
+    pthread_mutex_unlock(&g.lifecycle_mutex);
     return true;
 }
 
 void eden_bridge_stop(void) {
     EdenBridgeInitOnce();
+    pthread_mutex_lock(&g.lifecycle_mutex);
 
     if (!g.thread_valid) {
+        pthread_mutex_unlock(&g.lifecycle_mutex);
         return;
     }
 
+    if (atomic_load(&g.should_run)) {
+        eden_libretro_mark_exit_reason(EdenLibretroExitReasonUserRequested);
+    }
     atomic_store(&g.should_run, false);
 
     // Release the thread if it is parked on the visibility gate, or it will never see
@@ -808,6 +853,7 @@ void eden_bridge_stop(void) {
     pthread_join(g.thread, NULL);
     g.thread_valid = false;
     atomic_store(&g.state, EdenBridgeStateIdle);
+    pthread_mutex_unlock(&g.lifecycle_mutex);
 }
 
 EdenBridgeState eden_bridge_state(void) {

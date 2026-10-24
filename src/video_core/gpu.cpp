@@ -205,6 +205,10 @@ struct GPU::Impl {
         sync_request_cv.notify_all();
     }
 
+    [[nodiscard]] bool HasFatalError() const {
+        return sync_request_failed.load(std::memory_order_acquire);
+    }
+
     /// Obtain the CPU Context
     void ObtainContext() {
         if (!cpu_context) {
@@ -526,6 +530,10 @@ void GPU::NotifyShutdown() {
 
 void GPU::ReportFatalError() {
     impl->ReportFatalError();
+}
+
+bool GPU::HasFatalError() const {
+    return impl->HasFatalError();
 }
 
 void GPU::WaitForIdle() {

@@ -34,6 +34,23 @@
 extern "C" {
 #endif
 
+typedef enum EdenLibretroExitReason {
+    EdenLibretroExitReasonUnknown = 0,
+    EdenLibretroExitReasonGpuFatal = 1,
+    EdenLibretroExitReasonGuestRequested = 2,
+    EdenLibretroExitReasonUserRequested = 3,
+    EdenLibretroExitReasonLoadFailure = 4,
+} EdenLibretroExitReason;
+
+/// Set the first known cause for the current session; later events do not overwrite it.
+EDEN_LIBRETRO_API void eden_libretro_mark_exit_reason(EdenLibretroExitReason reason);
+
+/// Reset the cause before a new frontend session begins.
+EDEN_LIBRETRO_API void eden_libretro_reset_exit_reason(void);
+
+/// Read the classified cause selected by the core for RETRO_ENVIRONMENT_SHUTDOWN.
+EDEN_LIBRETRO_API EdenLibretroExitReason eden_libretro_exit_reason(void);
+
 /**
  * Hand the core the CAMetalLayer it should render into, and the layer's size in
  * PHYSICAL pixels (already multiplied by contentsScale).

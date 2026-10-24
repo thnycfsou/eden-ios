@@ -235,6 +235,9 @@ public:
     /// Wake synchronization waiters after an unrecoverable GPU-thread failure.
     void ReportFatalError();
 
+    /// Whether GPU work has failed and the frontend exit callback is fatal recovery.
+    [[nodiscard]] bool HasFatalError() const;
+
     /// Obtain the CPU Context
     void ObtainContext();
 

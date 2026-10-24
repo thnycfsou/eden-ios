@@ -153,7 +153,12 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
-    if (!ctx.profile.support_geometry_streams) {
+    if (!ctx.profile.support_geometry_streams && stream.IsImmediate() && stream.U32() == 0) {
+        // Stream zero is the ordinary geometry output stream. The SPIR-V stream
+        // instruction requires GeometryStreams even for stream zero, while the
+        // non-stream instruction has identical output semantics for that stream.
+        ctx.OpEmitVertex();
+    } else if (!ctx.profile.support_geometry_streams) {
         throw NotImplementedException("Geometry streams");
     } else if (stream.IsImmediate()) {
         ctx.OpEmitStreamVertex(ctx.Def(stream));
@@ -166,7 +171,11 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
 }
 
 void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {
-    if (!ctx.profile.support_geometry_streams) {
+    if (!ctx.profile.support_geometry_streams && stream.IsImmediate() && stream.U32() == 0) {
+        // As above, ending a primitive on stream zero is equivalent to the
+        // standard geometry instruction and does not need GeometryStreams.
+        ctx.OpEndPrimitive();
+    } else if (!ctx.profile.support_geometry_streams) {
         throw NotImplementedException("Geometry streams");
     } else if (stream.IsImmediate()) {
         ctx.OpEndStreamPrimitive(ctx.Def(stream));
