@@ -522,8 +522,6 @@ private:
     std::deque<boost::container::small_vector<BufferCopy, 4>> pending_downloads;
     std::optional<Async_Buffer> current_buffer;
 
-    std::deque<Async_Buffer> async_buffers_death_ring;
-
     size_t immediate_buffer_capacity = 0;
     Common::ScratchBuffer<u8> immediate_buffer_alloc;
 

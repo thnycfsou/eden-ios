@@ -4,7 +4,10 @@
 // SPDX-FileCopyrightText: Copyright 2019 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <exception>
+
 #include "common/assert.h"
+#include "common/logging.h"
 #include "common/scope_exit.h"
 #include "common/settings.h"
 #include "common/thread.h"
@@ -27,37 +30,76 @@ ThreadManager::~ThreadManager() = default;
 
 void ThreadManager::StartThread(VideoCore::RendererBase& renderer, Core::Frontend::GraphicsContext& context, Tegra::Control::Scheduler& scheduler) {
     rasterizer = renderer.ReadRasterizer();
+    state.failed.store(false, std::memory_order_release);
     thread = std::jthread([&](std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPU");
         Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
         Common::SetCurrentThreadToPerformanceCores();
-        system.RegisterHostThread();
+        try {
+            system.RegisterHostThread();
+            auto current_context = context.Acquire();
+            CommandDataContainer next;
+            while (!stop_token.stop_requested()) {
+                state.queue.PopWait(next, stop_token);
+                if (stop_token.stop_requested()) {
+                    break;
+                }
+                if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
+                    scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
+                } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
+                    system.GPU().TickWork();
+                } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
+                    renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
+                } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
+                    renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
+                } else {
+                    ASSERT(false);
+                }
+                state.signaled_fence.store(next.fence);
+                if (next.block) {
+                    std::scoped_lock lk{state.write_lock};
+                    state.cv.notify_all();
+                }
+            }
+        } catch (const std::exception& exception) {
+            LOG_CRITICAL(Render_Vulkan, "GPU thread stopped after exception: {}", exception.what());
+            {
+                std::scoped_lock lk{state.write_lock};
+                state.failed.store(true, std::memory_order_release);
+                state.cv.notify_all();
+            }
+            system.GPU().ReportFatalError();
+            try {
+                system.Exit();
+            } catch (...) {
+                LOG_CRITICAL(Render_Vulkan, "Frontend exit callback threw after GPU failure");
+            }
+        } catch (...) {
+            LOG_CRITICAL(Render_Vulkan, "GPU thread stopped after an unknown exception");
+            {
+                std::scoped_lock lk{state.write_lock};
+                state.failed.store(true, std::memory_order_release);
+                state.cv.notify_all();
+            }
+            system.GPU().ReportFatalError();
+            try {
+                system.Exit();
+            } catch (...) {
+                LOG_CRITICAL(Render_Vulkan, "Frontend exit callback threw after GPU failure");
+            }
+        }
 
-        auto current_context = context.Acquire();
+        // Continue draining commands as failed no-ops. This releases producers
+        // blocked on the bounded queue while the frontend unwinds and joins us.
         CommandDataContainer next;
         while (!stop_token.stop_requested()) {
             state.queue.PopWait(next, stop_token);
             if (stop_token.stop_requested()) {
                 break;
             }
-            if (auto* submit_list = std::get_if<SubmitListCommand>(&next.data)) {
-                scheduler.Push(system.GPU(), submit_list->channel, std::move(submit_list->entries));
-            } else if (std::holds_alternative<GPUTickCommand>(next.data)) {
-                system.GPU().TickWork();
-            } else if (const auto* flush = std::get_if<FlushRegionCommand>(&next.data)) {
-                renderer.ReadRasterizer()->FlushRegion(flush->addr, flush->size);
-            } else if (const auto* invalidate = std::get_if<InvalidateRegionCommand>(&next.data)) {
-                renderer.ReadRasterizer()->OnCacheInvalidation(invalidate->addr, invalidate->size);
-            } else {
-                ASSERT(false);
-            }
-            state.signaled_fence.store(next.fence);
-            if (next.block) {
-                // We have to lock the write_lock to ensure that the condition_variable wait not get a
-                // race between the check and the lock itself.
-                std::scoped_lock lk{state.write_lock};
-                state.cv.notify_all();
-            }
+            state.signaled_fence.store(next.fence, std::memory_order_release);
+            std::scoped_lock lk{state.write_lock};
+            state.cv.notify_all();
         }
     });
 }
@@ -107,7 +149,8 @@ u64 ThreadManager::PushCommand(CommandData&& command_data, bool block, bool is_a
 
     if (block) {
         state.cv.wait(lk, thread.get_stop_token(), [this, fence] {
-            return fence <= state.signaled_fence.load(std::memory_order_relaxed);
+            return state.failed.load(std::memory_order_acquire) ||
+                   fence <= state.signaled_fence.load(std::memory_order_relaxed);
         });
     }
 

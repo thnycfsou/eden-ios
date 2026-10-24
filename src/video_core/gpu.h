@@ -232,6 +232,9 @@ public:
     /// Performs any additional necessary steps to shutdown GPU emulation.
     void NotifyShutdown();
 
+    /// Wake synchronization waiters after an unrecoverable GPU-thread failure.
+    void ReportFatalError();
+
     /// Obtain the CPU Context
     void ObtainContext();
 

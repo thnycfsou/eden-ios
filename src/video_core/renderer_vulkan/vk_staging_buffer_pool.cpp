@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include <algorithm>
+#include <bit>
+#include <limits>
 #include <utility>
 #include <vector>
 
@@ -101,6 +103,10 @@ StagingBufferPool::StagingBufferPool(const Device& device_, MemoryAllocator& mem
 StagingBufferPool::~StagingBufferPool() = default;
 
 StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool deferred) {
+    std::scoped_lock lock{cache_mutex};
+    if (size > (size_t{1} << (NUM_LEVELS - 1))) {
+        throw vk::Exception{VK_ERROR_OUT_OF_DEVICE_MEMORY};
+    }
     if (!deferred && usage == MemoryUsage::Upload && size <= region_size) {
         return GetStreamBuffer(size);
     }
@@ -108,6 +114,7 @@ StagingBufferRef StagingBufferPool::Request(size_t size, MemoryUsage usage, bool
 }
 
 void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
+    std::scoped_lock lock{cache_mutex};
     auto& entries = GetCache(ref.usage)[ref.log2_level].entries;
     const auto is_this_one = [&ref](const StagingBuffer& entry) {
         return entry.index == ref.index;
@@ -120,6 +127,7 @@ void StagingBufferPool::FreeDeferred(StagingBufferRef& ref) {
 }
 
 void StagingBufferPool::TickFrame() {
+    std::scoped_lock lock{cache_mutex};
     current_delete_level = (current_delete_level + 1) % NUM_LEVELS;
 
     ReleaseCache(MemoryUsage::DeviceLocal);
@@ -203,12 +211,19 @@ std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t s
 }
 
 StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage usage, bool deferred) {
-    auto const log2_size = Common::Log2Ceil<u32>(u32(size));
+    // Keep the rounded allocation representable both by VkDeviceSize and by the
+    // cache-level array. In particular, do not truncate large size_t requests to u32.
+    const size_t rounded_log2 = size > 1 ? std::bit_width(size - 1) : 0;
+    if (rounded_log2 >= NUM_LEVELS || rounded_log2 >= std::numeric_limits<VkDeviceSize>::digits) {
+        throw vk::Exception{VK_ERROR_OUT_OF_DEVICE_MEMORY};
+    }
+    const auto log2_size = static_cast<u32>(rounded_log2);
+    const VkDeviceSize allocation_size = VkDeviceSize{1} << log2_size;
     VkBufferCreateInfo buffer_ci = {
         .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
         .pNext = nullptr,
         .flags = 0,
-        .size = 1ULL << log2_size,
+        .size = allocation_size,
         .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                  VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                  VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
@@ -222,7 +237,16 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, usage);
+    vk::Buffer buffer = [&] {
+        try {
+            return memory_allocator.CreateBuffer(buffer_ci, usage);
+        } catch (const vk::Exception& exception) {
+            LOG_ERROR(Render_Vulkan,
+                      "Staging buffer allocation failed: requested={} rounded={} usage={} VkResult={}",
+                      size, allocation_size, static_cast<u32>(usage), exception.GetResult());
+            throw;
+        }
+    }();
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
         buffer.SetObjectNameEXT(fmt::format("Staging Buffer {}", buffer_index).c_str());

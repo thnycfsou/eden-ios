@@ -105,11 +105,6 @@ void BufferCache<P>::TickFrame() {
     }
     ++frame_tick;
     delayed_destruction_ring.Tick();
-
-    for (auto& buffer : async_buffers_death_ring) {
-        runtime.FreeDeferredStagingBuffer(buffer);
-    }
-    async_buffers_death_ring.clear();
 }
 
 template <class P>
@@ -704,7 +699,11 @@ void BufferCache<P>::PopAsyncBuffers() {
             gpu_modified_ranges.Subtract(start, end - start);
         });
     }
-    async_buffers_death_ring.emplace_back(*async_buffer);
+    // The fencing thread calls PopAsyncBuffers only after the Vulkan fence has
+    // completed and after copying the mapped bytes back to guest memory. Return
+    // the deferred staging allocation immediately so it can be reused even if
+    // presentation stops and TickFrame is no longer called.
+    runtime.FreeDeferredStagingBuffer(*async_buffer);
     async_buffers.pop_front();
     pending_downloads.pop_front();
 }

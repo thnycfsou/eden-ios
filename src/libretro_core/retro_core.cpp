@@ -395,11 +395,6 @@ bool LoadGameInternal(const std::string& path) {
 
     LibretroCore::Video::OnGameLoaded();
 
-    g_system->GPU().Start();                 // video_core/gpu.h:230
-    LoadCheckpoint("libretro.load_game.gpu_started");
-    g_system->GetCpuManager().OnGpuReady();  // cpu_manager.h:54 - releases the barrier
-                                             // the guest CPU threads are parked on
-
     g_system->RegisterExitCallback([] { // core.h:440
         // Fires on a GUEST thread. Only raise a flag / notify the frontend here -
         // never tear down Core::System from inside it.
@@ -407,6 +402,11 @@ bool LoadGameInternal(const std::string& path) {
             g_environ_cb(RETRO_ENVIRONMENT_SHUTDOWN, nullptr);
         }
     });
+
+    g_system->GPU().Start();                 // video_core/gpu.h:230
+    LoadCheckpoint("libretro.load_game.gpu_started");
+    g_system->GetCpuManager().OnGpuReady();  // cpu_manager.h:54 - releases the barrier
+                                             // the guest CPU threads are parked on
 
     g_system->Run(); // core.h:168 - called exactly once, never from retro_run
 

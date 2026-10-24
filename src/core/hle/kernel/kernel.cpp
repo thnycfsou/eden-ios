@@ -198,11 +198,15 @@ struct KernelCore::Impl {
         object_name_global_data.reset();
 
         // Ensure that the object list container is finalized and properly shutdown.
-        global_object_list_container->Finalize();
-        global_object_list_container.reset();
+        if (global_object_list_container) {
+            global_object_list_container->Finalize();
+            global_object_list_container.reset();
+        }
 
-        hardware_timer->Finalize();
-        hardware_timer.reset();
+        if (hardware_timer) {
+            hardware_timer->Finalize();
+            hardware_timer.reset();
+        }
     }
 
     void CloseServices() {

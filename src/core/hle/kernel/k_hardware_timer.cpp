@@ -21,7 +21,9 @@ void KHardwareTimer::Initialize() {
 }
 
 void KHardwareTimer::Finalize() {
-    m_kernel.System().CoreTiming().UnscheduleEvent(m_event_type);
+    if (m_event_type) {
+        m_kernel.System().CoreTiming().UnscheduleEvent(m_event_type);
+    }
     m_wakeup_time = (std::numeric_limits<s64>::max)();
     m_event_type.reset();
 }

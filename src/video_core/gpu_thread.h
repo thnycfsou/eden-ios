@@ -98,6 +98,7 @@ struct SynchState final {
     CommandQueue queue;
     u64 last_fence{};
     std::atomic<u64> signaled_fence{};
+    std::atomic_bool failed{};
     std::condition_variable_any cv;
 };
 

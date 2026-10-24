@@ -141,7 +141,10 @@ struct GPU::Impl {
 
     void WaitForSyncOperation(const u64 fence) {
         std::unique_lock lck{sync_request_mutex};
-        sync_request_cv.wait(lck, [this, fence] { return CurrentSyncRequestFence() >= fence; });
+        sync_request_cv.wait(lck, [this, fence] {
+            return sync_request_failed.load(std::memory_order_acquire) ||
+                   CurrentSyncRequestFence() >= fence;
+        });
     }
 
     void WaitForIdle() {
@@ -156,10 +159,17 @@ struct GPU::Impl {
         while (!sync_requests.empty()) {
             auto request = std::move(sync_requests.front());
             sync_requests.pop_front();
-            sync_request_mutex.unlock();
-            request();
+            lck.unlock();
+            try {
+                request();
+            } catch (...) {
+                lck.lock();
+                sync_request_failed.store(true, std::memory_order_release);
+                sync_request_cv.notify_all();
+                throw;
+            }
             current_sync_fence.fetch_add(1, std::memory_order_release);
-            sync_request_mutex.lock();
+            lck.lock();
             sync_request_cv.notify_all();
         }
     }
@@ -177,6 +187,7 @@ struct GPU::Impl {
     /// This can be used to launch any necessary threads and register any necessary
     /// core timing events.
     void Start() {
+        sync_request_failed.store(false, std::memory_order_release);
         Settings::UpdateGPUAccuracy();
         gpu_thread.StartThread(*renderer, renderer->Context(), scheduler);
     }
@@ -186,6 +197,12 @@ struct GPU::Impl {
         std::unique_lock lk{sync_mutex};
         shutting_down.store(true, std::memory_order::relaxed);
         sync_cv.notify_all();
+    }
+
+    void ReportFatalError() {
+        std::scoped_lock lock{sync_request_mutex};
+        sync_request_failed.store(true, std::memory_order_release);
+        sync_request_cv.notify_all();
     }
 
     /// Obtain the CPU Context
@@ -343,6 +360,7 @@ struct GPU::Impl {
     u64 last_sync_fence{};
     std::mutex sync_request_mutex;
     std::condition_variable sync_request_cv;
+    std::atomic_bool sync_request_failed{};
 
     const bool is_async;
 
@@ -504,6 +522,10 @@ void GPU::Start() {
 
 void GPU::NotifyShutdown() {
     impl->NotifyShutdown();
+}
+
+void GPU::ReportFatalError() {
+    impl->ReportFatalError();
 }
 
 void GPU::WaitForIdle() {
