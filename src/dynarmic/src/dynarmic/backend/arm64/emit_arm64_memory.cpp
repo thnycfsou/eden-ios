@@ -37,7 +37,7 @@ bool IsOrdered(IR::AccType acctype) {
 }
 
 u64 GetMemoryAccessPC(IR::Inst* inst) {
-    return A64::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetImmediateU64()}}.PC();
+    return A64::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetImmediateAsU64()}}.PC();
 }
 
 LinkTarget ReadMemoryLinkTarget(std::size_t bitsize) {
