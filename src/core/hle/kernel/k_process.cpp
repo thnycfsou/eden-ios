@@ -186,6 +186,8 @@ void KProcess::Finalize(KernelCore& kernel) {
 }
 
 Result KProcess::Initialize(KernelCore& kernel, const Svc::CreateProcessParameter& params, KResourceLimit* res_limit, bool is_real) {
+    m_unmapped_read_captured.store(false, std::memory_order_relaxed);
+
     // TODO: remove this special case
     if (is_real) {
         // Create and clear the process local region.

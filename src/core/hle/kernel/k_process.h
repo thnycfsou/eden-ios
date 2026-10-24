@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <map>
 
 #include "core/arm/arm_interface.h"
@@ -131,6 +132,7 @@ private:
     u32 m_version{};
 
     std::atomic<u16> m_num_running_threads{};
+    std::atomic<bool> m_unmapped_read_captured{};
 
     bool m_is_signaled : 1 = false;
     bool m_is_initialized : 1 = false;
@@ -183,6 +185,16 @@ public:
 
     u64 GetProcessId() const {
         return m_process_id;
+    }
+
+    bool HasCapturedUnmappedRead() const {
+        return m_unmapped_read_captured.load(std::memory_order_acquire);
+    }
+
+    bool TryCaptureUnmappedRead() {
+        bool expected = false;
+        return m_unmapped_read_captured.compare_exchange_strong(
+            expected, true, std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
     State GetState() const {

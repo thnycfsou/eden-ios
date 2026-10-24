@@ -116,9 +116,9 @@ static void* EmitExclusiveReadCallTrampoline(oaknut::CodeGenerator& code, const 
 
     oaknut::Label l_addr, l_this;
 
-    auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr) -> T {
+    auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr, A64::VAddr pc) -> T {
         return conf.global_monitor->ReadAndMark<T>(conf.processor_id, vaddr, [&]() -> T {
-            return (conf.callbacks->*callback)(vaddr, sizeof(T));
+            return (conf.callbacks->*callback)(vaddr, sizeof(T), pc);
         });
     };
 
@@ -194,7 +194,7 @@ static void* EmitExclusiveWriteCallTrampoline(oaknut::CodeGenerator& code, const
 static void* EmitRead128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCallbacks* this_) {
     using namespace oaknut::util;
 
-    const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128>(this_);
+    const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128WithPC>(this_);
 
     oaknut::Label l_addr, l_this;
 
@@ -220,7 +220,7 @@ static void* EmitRead128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCal
 static void* EmitWrappedRead128CallTrampoline(oaknut::CodeGenerator& code, A64::UserCallbacks* this_) {
     using namespace oaknut::util;
 
-    const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128>(this_);
+    const auto info = Devirtualize<&A64::UserCallbacks::MemoryRead128WithPC>(this_);
 
     oaknut::Label l_addr, l_this;
 
@@ -251,9 +251,9 @@ static void* EmitExclusiveRead128CallTrampoline(oaknut::CodeGenerator& code, con
 
     oaknut::Label l_addr, l_this;
 
-    auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr) -> Vector {
+    auto fn = [](const A64::UserConfig& conf, A64::VAddr vaddr, A64::VAddr pc) -> Vector {
         return conf.global_monitor->ReadAndMark<Vector>(conf.processor_id, vaddr, [&]() -> Vector {
-            return conf.callbacks->MemoryRead128(vaddr);
+            return conf.callbacks->MemoryRead128WithPC(vaddr, pc);
         });
     };
 
@@ -380,20 +380,20 @@ void A64AddressSpace::EmitPrelude() {
 
     UnprotectCodeMemory();
 
-    prelude_info.read_memory_8 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
-    prelude_info.read_memory_16 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
-    prelude_info.read_memory_32 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
-    prelude_info.read_memory_64 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
+    prelude_info.read_memory_8 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u8));
+    prelude_info.read_memory_16 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u16));
+    prelude_info.read_memory_32 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u32));
+    prelude_info.read_memory_64 = EmitCallReadTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u64));
     prelude_info.read_memory_128 = EmitRead128CallTrampoline(code, conf.callbacks);
-    prelude_info.wrapped_read_memory_8 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u8));
-    prelude_info.wrapped_read_memory_16 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u16));
-    prelude_info.wrapped_read_memory_32 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u32));
-    prelude_info.wrapped_read_memory_64 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryRead>(code, conf.callbacks, sizeof(u64));
+    prelude_info.wrapped_read_memory_8 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u8));
+    prelude_info.wrapped_read_memory_16 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u16));
+    prelude_info.wrapped_read_memory_32 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u32));
+    prelude_info.wrapped_read_memory_64 = EmitWrappedReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC>(code, conf.callbacks, sizeof(u64));
     prelude_info.wrapped_read_memory_128 = EmitWrappedRead128CallTrampoline(code, conf.callbacks);
-    prelude_info.exclusive_read_memory_8 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u8>(code, conf);
-    prelude_info.exclusive_read_memory_16 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u16>(code, conf);
-    prelude_info.exclusive_read_memory_32 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u32>(code, conf);
-    prelude_info.exclusive_read_memory_64 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryRead, u64>(code, conf);
+    prelude_info.exclusive_read_memory_8 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC, u8>(code, conf);
+    prelude_info.exclusive_read_memory_16 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC, u16>(code, conf);
+    prelude_info.exclusive_read_memory_32 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC, u32>(code, conf);
+    prelude_info.exclusive_read_memory_64 = EmitExclusiveReadCallTrampoline<&A64::UserCallbacks::MemoryReadWithPC, u64>(code, conf);
     prelude_info.exclusive_read_memory_128 = EmitExclusiveRead128CallTrampoline(code, conf);
     prelude_info.write_memory_8 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u8));
     prelude_info.write_memory_16 = EmitCallWriteTrampoline<&A64::UserCallbacks::MemoryWrite>(code, conf.callbacks, sizeof(u16));

@@ -12,6 +12,10 @@
 #include "core/hle/kernel/k_process.h"
 #include "dynarmic/interface/A64/config.h"
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 namespace Core {
 
 using namespace Common::Literals;
@@ -23,7 +27,14 @@ DynarmicCallbacks64::DynarmicCallbacks64(ArmDynarmic64& parent, Kernel::KProcess
 {}
 
 u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
-    CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read);
+    return MemoryReadWithPC(vaddr, size, m_parent.m_jit->GetPC());
+}
+
+u64 DynarmicCallbacks64::MemoryReadWithPC(u64 vaddr, size_t size, u64 pc) {
+    CaptureFirstInvalidRead(vaddr, size, pc);
+    if (!CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read)) {
+        return 0;
+    }
     switch (size) {
     case sizeof(u64): return m_memory.Read64(vaddr);
     case sizeof(u32): return m_memory.Read32(vaddr);
@@ -33,8 +44,96 @@ u64 DynarmicCallbacks64::MemoryRead(u64 vaddr, size_t size) {
     }
 }
 Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128(u64 vaddr) {
-    CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Read);
+    return MemoryRead128WithPC(vaddr, m_parent.m_jit->GetPC());
+}
+
+Dynarmic::A64::Vector DynarmicCallbacks64::MemoryRead128WithPC(u64 vaddr, u64 pc) {
+    CaptureFirstInvalidRead(vaddr, 16, pc);
+    if (!CheckMemoryAccess(vaddr, 16, Kernel::DebugWatchpointType::Read)) {
+        return {};
+    }
     return {m_memory.Read64(vaddr), m_memory.Read64(vaddr + 8)};
+}
+
+void DynarmicCallbacks64::CaptureFirstInvalidRead(u64 addr, size_t size, u64 pc) {
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+    if (m_process->HasCapturedUnmappedRead() ||
+        m_memory.IsValidVirtualAddressRange(addr, size) ||
+        !m_process->TryCaptureUnmappedRead()) {
+        return;
+    }
+
+    // PC comes from the IR location descriptor passed by the JIT. Reading the
+    // architectural register context here is unsafe: inline-page-table and
+    // fastmem fallbacks can run with guest registers still held in host registers.
+    const u64 page_table_width = m_process->GetPageTable().GetAddressSpaceWidth();
+    const auto canonical_address = Common::PageTable::CanonicalizeAddress(addr, page_table_width);
+    const auto instruction_address = Common::PageTable::CanonicalizeAddress(pc, page_table_width);
+    const auto& page_table = m_process->GetPageTable().GetImpl();
+    bool instruction_available = instruction_address &&
+                                m_memory.IsValidVirtualAddressRange(pc, sizeof(u32));
+    u32 instruction = 0;
+    if (instruction_available) {
+        const size_t instruction_page = *instruction_address >> Core::Memory::YUZU_PAGEBITS;
+        if (instruction_page < page_table.entries.size()) {
+            const auto [host_pointer, page_type, block] =
+                page_table.entries[instruction_page].PointerTypeBlock();
+            (void)host_pointer;
+            (void)block;
+            instruction_available = page_type == Common::PageType::Memory ||
+                                    page_type == Common::PageType::DebugMemory;
+        } else {
+            instruction_available = false;
+        }
+    }
+    if (instruction_available) {
+        instruction = m_memory.Read32(*instruction_address);
+    }
+    const u64 thread_id = m_current_thread ? m_current_thread->GetThreadId() : 0;
+    LOG_CRITICAL(Core_ARM,
+                 "First unmapped A64 read: pid={} tid={} title={:016x} name={} pc={:016x} "
+                 "insn={:08x} insn_available={} address={:016x} size={} page_bits={}",
+                 m_process->GetProcessId(), thread_id, m_process->GetProgramId(),
+                 m_process->GetName(), pc, instruction, instruction_available, addr, size,
+                 page_table_width);
+
+    if (canonical_address) {
+        const size_t page_index = *canonical_address >> Core::Memory::YUZU_PAGEBITS;
+        Kernel::KMemoryInfo memory_info{};
+        Kernel::Svc::PageInfo page_info{};
+        const auto query_result = m_process->GetPageTable().QueryInfo(
+            &memory_info, &page_info, Kernel::KProcessAddress{*canonical_address});
+        if (page_index < page_table.entries.size()) {
+            const auto [host_pointer, page_type, block] =
+                page_table.entries[page_index].PointerTypeBlock();
+            LOG_CRITICAL(Core_ARM,
+                         "Fault mapping VA={:016x} entry_type={} block={} host_pointer={:016x} "
+                         "query_result={:08x}",
+                         *canonical_address, static_cast<u32>(page_type), block, host_pointer,
+                         query_result.raw);
+        } else {
+            LOG_CRITICAL(Core_ARM,
+                         "Fault mapping VA={:016x} has no host page-table entry (index={} size={}) "
+                         "query_result={:08x}",
+                         *canonical_address, page_index, page_table.entries.size(), query_result.raw);
+        }
+        if (query_result.IsSuccess()) {
+            LOG_CRITICAL(Core_ARM,
+                         "Fault guest mapping base={:016x} size={:x} state={:x} permission={:x} "
+                         "attribute={:x} page_flags={:x}",
+                         memory_info.m_address, memory_info.m_size,
+                         static_cast<u32>(memory_info.m_state),
+                         static_cast<u32>(memory_info.m_permission),
+                         static_cast<u32>(memory_info.m_attribute), page_info.flags);
+        }
+    } else {
+        LOG_CRITICAL(Core_ARM, "Fault address is not canonical for the guest page-table width");
+    }
+#else
+    (void)addr;
+    (void)size;
+    (void)pc;
+#endif
 }
 
 std::optional<u32> DynarmicCallbacks64::MemoryReadCode(u64 vaddr) {
@@ -163,9 +262,16 @@ bool DynarmicCallbacks64::CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWat
     }
 
     if (!m_memory.IsValidVirtualAddressRange(addr, size)) {
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+        if (!m_process->HasCapturedUnmappedRead()) {
+            LOG_CRITICAL(Core_ARM, "Stopping execution due to unmapped memory access at {:#x}",
+                         addr);
+        }
+#else
         LOG_CRITICAL(Core_ARM, "Stopping execution due to unmapped memory access at {:#x}",
-                        addr);
-        m_parent.m_jit->HaltExecution(PrefetchAbort);
+                     addr);
+#endif
+        m_parent.m_jit->HaltExecution(DataAbort);
         return false;
     }
 
@@ -254,7 +360,6 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
     if (m_system.DebuggerEnabled()) {
         config.check_halt_on_memory_access = true;
     }
-
     // null_jit
     if (!page_table) {
         // Don't waste too much memory on null_jit
@@ -350,11 +455,25 @@ void ArmDynarmic64::MakeJit(Common::PageTable* page_table, std::size_t address_s
 
 HaltReason ArmDynarmic64::RunThread(Kernel::KThread* thread) {
     m_jit->ClearExclusiveState();
+    m_halted_watchpoint = nullptr;
+    m_cb->SetCurrentThread(thread);
+    struct CurrentThreadReset {
+        DynarmicCallbacks64& callbacks;
+        ~CurrentThreadReset() { callbacks.SetCurrentThread(nullptr); }
+    };
+    [[maybe_unused]] const CurrentThreadReset reset{*m_cb};
     return TranslateHaltReason(m_jit->Run());
 }
 
 HaltReason ArmDynarmic64::StepThread(Kernel::KThread* thread) {
     m_jit->ClearExclusiveState();
+    m_halted_watchpoint = nullptr;
+    m_cb->SetCurrentThread(thread);
+    struct CurrentThreadReset {
+        DynarmicCallbacks64& callbacks;
+        ~CurrentThreadReset() { callbacks.SetCurrentThread(nullptr); }
+    };
+    [[maybe_unused]] const CurrentThreadReset reset{*m_cb};
     return TranslateHaltReason(m_jit->Step());
 }
 

@@ -97,6 +97,15 @@ struct UserCallbacks {
     virtual std::uint64_t MemoryRead(VAddr vaddr, std::size_t size) = 0;
     virtual Vector MemoryRead128(VAddr vaddr) = 0;
 
+    // The A64 backend can provide the guest PC for bounded fault diagnostics.
+    // Existing callback implementations retain their original behavior.
+    virtual std::uint64_t MemoryReadWithPC(VAddr vaddr, std::size_t size, VAddr /*pc*/) {
+        return MemoryRead(vaddr, size);
+    }
+    virtual Vector MemoryRead128WithPC(VAddr vaddr, VAddr /*pc*/) {
+        return MemoryRead128(vaddr);
+    }
+
     // Writes through these callbacks may not be aligned.
     virtual void MemoryWrite(VAddr vaddr, std::uint64_t value, std::size_t size) = 0;
     virtual void MemoryWrite128(VAddr vaddr, Vector value) = 0;

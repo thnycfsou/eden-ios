@@ -20,6 +20,7 @@
 #include "dynarmic/backend/arm64/emit_context.h"
 #include "dynarmic/backend/arm64/fastmem.h"
 #include "dynarmic/backend/arm64/fpsr_manager.h"
+#include "dynarmic/frontend/A64/a64_location_descriptor.h"
 #include "dynarmic/backend/arm64/reg_alloc.h"
 #include "dynarmic/ir/acc_type.h"
 #include "dynarmic/ir/basic_block.h"
@@ -33,6 +34,10 @@ namespace {
 
 bool IsOrdered(IR::AccType acctype) {
     return acctype == IR::AccType::ORDERED || acctype == IR::AccType::ORDEREDRW || acctype == IR::AccType::LIMITEDORDERED;
+}
+
+u64 GetMemoryAccessPC(IR::Inst* inst) {
+    return A64::LocationDescriptor{IR::LocationDescriptor{inst->GetArg(0).GetImmediateU64()}}.PC();
 }
 
 LinkTarget ReadMemoryLinkTarget(std::size_t bitsize) {
@@ -136,6 +141,8 @@ void CallbackOnlyEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, I
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.PrepareForCall({}, args[1]);
     const bool ordered = IsOrdered(args[2].GetImmediateAccType());
+    oaknut::Label end;
+    code.MOV(bitsize == 128 ? X2 : X3, GetMemoryAccessPC(inst));
 
     EmitRelocation(code, ctx, ReadMemoryLinkTarget(bitsize));
     if (ordered) {
@@ -148,6 +155,8 @@ void CallbackOnlyEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, I
     } else {
         ctx.reg_alloc.DefineAsRegister(inst, X0);
     }
+    ctx.conf.emit_check_memory_abort(code, ctx, inst, end);
+    code.l(end);
 }
 
 template<std::size_t bitsize>
@@ -155,7 +164,9 @@ void CallbackOnlyEmitExclusiveReadMemory(oaknut::CodeGenerator& code, EmitContex
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
     ctx.reg_alloc.PrepareForCall({}, args[1]);
     const bool ordered = IsOrdered(args[2].GetImmediateAccType());
+    oaknut::Label end;
 
+    code.MOV(X2, GetMemoryAccessPC(inst));
     code.MOV(Wscratch0, 1);
     code.STRB(Wscratch0, Xstate, ctx.conf.state_exclusive_state_offset);
     EmitRelocation(code, ctx, ExclusiveReadMemoryLinkTarget(bitsize));
@@ -169,6 +180,8 @@ void CallbackOnlyEmitExclusiveReadMemory(oaknut::CodeGenerator& code, EmitContex
     } else {
         ctx.reg_alloc.DefineAsRegister(inst, X0);
     }
+    ctx.conf.emit_check_memory_abort(code, ctx, inst, end);
+    code.l(end);
 }
 
 template<std::size_t bitsize>
@@ -441,6 +454,7 @@ void InlinePageTableEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx
     ctx.deferred_emits.emplace_back([&code, &ctx, inst, Xaddr = *Xaddr, Rvalue = *Rvalue, ordered, fallback, end] {
         code.l(*fallback);
         code.MOV(Xscratch0, Xaddr);
+        code.MOV(bitsize == 128 ? X2 : X3, GetMemoryAccessPC(inst));
         EmitRelocation(code, ctx, WrappedReadMemoryLinkTarget(bitsize));
         if (ordered) {
             code.DMB(oaknut::BarrierOp::ISH);
@@ -570,6 +584,7 @@ void FastmemEmitReadMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::In
 
         code.l(*fallback);
         code.MOV(Xscratch0, Xaddr);
+        code.MOV(bitsize == 128 ? X2 : X3, GetMemoryAccessPC(inst));
         EmitRelocation(code, ctx, WrappedReadMemoryLinkTarget(bitsize));
         if (ordered) {
             code.DMB(oaknut::BarrierOp::ISH);

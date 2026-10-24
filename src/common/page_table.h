@@ -7,6 +7,8 @@
 #pragma once
 
 #include <atomic>
+#include <limits>
+#include <optional>
 
 #include "common/common_types.h"
 #include "common/sparse_large_vector.h"
@@ -32,6 +34,44 @@ enum class PageType : u8 {
  * mimics the way a real CPU page table works.
  */
 struct PageTable {
+    /// Translate an address-space-width sign-extended address to its page-table index.
+    /// Non-canonical addresses are rejected instead of being truncated.
+    [[nodiscard]] static std::optional<u64> CanonicalizeAddress(u64 address,
+                                                                 std::size_t address_space_bits) noexcept {
+        if (address_space_bits == 0 || address_space_bits > 64) {
+            return std::nullopt;
+        }
+        if (address_space_bits == 64) {
+            return address;
+        }
+
+        const u64 mask = (1ULL << address_space_bits) - 1;
+        const u64 address_low = address & mask;
+        if (address == address_low) {
+            return address_low;
+        }
+
+        const u64 sign_bit = 1ULL << (address_space_bits - 1);
+        const u64 canonical = (address_low & sign_bit) ? (address_low | ~mask) : address_low;
+        return address == canonical ? std::optional<u64>{address_low} : std::nullopt;
+    }
+
+    /// Check a half-open byte range after applying only architectural sign extension.
+    [[nodiscard]] static bool ContainsAddressRange(u64 address, u64 size,
+                                                    std::size_t address_space_bits) noexcept {
+        const auto canonical = CanonicalizeAddress(address, address_space_bits);
+        if (!canonical) {
+            return false;
+        }
+        if (address_space_bits == 64) {
+            // Callers form the exclusive end as address + size, so that endpoint
+            // must remain representable even when the final byte would be UINT64_MAX.
+            return size <= std::numeric_limits<u64>::max() - *canonical;
+        }
+        const u64 address_space_end = 1ULL << address_space_bits;
+        return size <= address_space_end - *canonical;
+    }
+
     struct TraversalEntry {
         u64 phys_addr{};
         std::size_t block_size{};

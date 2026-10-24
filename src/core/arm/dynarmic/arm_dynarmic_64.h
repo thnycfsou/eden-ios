@@ -6,7 +6,6 @@
 
 #pragma once
 
-#include <atomic>
 #include <memory>
 #include "common/container/unordered_map.h"
 
@@ -39,6 +38,8 @@ public:
 
     u64 MemoryRead(u64 vaddr, size_t size) override;
     Dynarmic::A64::Vector MemoryRead128(u64 vaddr) override;
+    u64 MemoryReadWithPC(u64 vaddr, size_t size, u64 pc) override;
+    Dynarmic::A64::Vector MemoryRead128WithPC(u64 vaddr, u64 pc) override;
     std::optional<u32> MemoryReadCode(u64 vaddr) override;
     void InstructionSynchronizationBarrierRaised() override {
         last_code_addr = u64(-1); //reset back, force refetch
@@ -58,6 +59,8 @@ public:
     u64 GetCNTPCT() override;
     bool CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWatchpointType type);
     void ReturnException(u64 pc, Dynarmic::HaltReason hr);
+    void CaptureFirstInvalidRead(u64 addr, size_t size, u64 pc);
+    void SetCurrentThread(Kernel::KThread* thread) { m_current_thread = thread; }
 
     Dynarmic::CodePage cached_code_page;
     u64 last_code_addr = u64(-1);
@@ -68,6 +71,7 @@ public:
     Kernel::KProcess* m_process{};
     const bool m_debugger_enabled{};
     const bool m_check_memory_access{};
+    Kernel::KThread* m_current_thread{};
     static constexpr u64 MinimumRunCycles = 10000U;
 };
 

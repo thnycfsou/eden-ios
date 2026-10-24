@@ -6,6 +6,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <cstring>
 #include <mutex>
 #include <new>
@@ -39,8 +41,8 @@
 namespace Core::Memory {
 
 static inline bool AddressSpaceContains(const Common::PageTable& table, const Common::ProcessAddress addr, const std::size_t size) {
-    const Common::ProcessAddress max_addr = 1ULL << table.GetAddressSpaceBits();
-    return addr + size >= addr && addr + size <= max_addr;
+    return Common::PageTable::ContainsAddressRange(GetInteger(addr), size,
+                                                   table.GetAddressSpaceBits());
 }
 
 // Implementation class used to keep the specifics of the memory subsystem hidden
@@ -48,6 +50,19 @@ static inline bool AddressSpaceContains(const Common::PageTable& table, const Co
 // subsystem without needing to rebuild all files that make use of the memory interface.
 struct Memory::Impl {
     explicit Impl(Core::System& system_) : system{system_} {}
+
+    // An unmapped guest address can be accessed from a tight guest loop. Keep
+    // reporting the first occurrence and powers of two so a bad guest access
+    // cannot flood the log or consume the host CPU writing diagnostics.
+    void LogUnmappedRead(u64 addr, std::size_t size) noexcept {
+        const std::size_t counter_index = std::min(size, unmapped_read_counts.size() - 1);
+        const u64 occurrence =
+            unmapped_read_counts[counter_index].fetch_add(1, std::memory_order_relaxed) + 1;
+        if (occurrence == 1 || (occurrence & (occurrence - 1)) == 0) {
+            LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x} (occurrence {})", size * 8,
+                      addr, occurrence);
+        }
+    }
 
     void SetCurrentPageTable(Kernel::KProcess& process) {
         current_page_table = &process.GetPageTable().GetImpl();
@@ -241,18 +256,21 @@ struct Memory::Impl {
     template<typename F1, typename F2, typename F3>
     inline bool WalkBlock(const Common::ProcessAddress addr, const std::size_t size, F1&& on_unmapped, F2&& on_memory, F3&& on_rasterizer) {
         std::size_t offset = 0;
-        if (!AddressSpaceContains(*current_page_table, addr, size)) {
+        const auto canonical_address = Common::PageTable::CanonicalizeAddress(
+            GetInteger(addr), current_page_table->GetAddressSpaceBits());
+        if (!canonical_address || !AddressSpaceContains(*current_page_table, *canonical_address, size)) {
             on_unmapped(offset, size, addr);
             return false;
         }
+        const auto normalized_addr = Common::ProcessAddress{*canonical_address};
         std::size_t remaining_size = size;
-        std::size_t page_index = addr >> YUZU_PAGEBITS;
-        std::size_t page_offset = addr & YUZU_PAGEMASK;
+        std::size_t page_index = normalized_addr >> YUZU_PAGEBITS;
+        std::size_t page_offset = normalized_addr & YUZU_PAGEMASK;
         bool user_accessible = true;
 
         const std::size_t page_end = size == 0
             ? page_index
-            : ((GetInteger(addr) + size - 1) >> YUZU_PAGEBITS) + 1;
+            : ((GetInteger(normalized_addr) + size - 1) >> YUZU_PAGEBITS) + 1;
         if (!current_page_table->entries.CommitRegion(page_index, page_end)) {
             LOG_ERROR(HW_Memory, "Failed to commit page-table metadata for guest read/write block");
             return false;
@@ -404,9 +422,13 @@ struct Memory::Impl {
     }
 
     void MarkRegionDebug(u64 vaddr, u64 size, bool debug) {
-        if (vaddr == 0 || !AddressSpaceContains(*current_page_table, vaddr, size)) {
+        const auto canonical_address = Common::PageTable::CanonicalizeAddress(
+            vaddr, current_page_table->GetAddressSpaceBits());
+        if (vaddr == 0 || !canonical_address ||
+            !AddressSpaceContains(*current_page_table, *canonical_address, size)) {
             return;
         }
+        vaddr = *canonical_address;
 
         if (current_page_table->fastmem_arena) {
             const auto perm{debug ? Common::MemoryPermission{}
@@ -465,9 +487,13 @@ struct Memory::Impl {
     }
 
     void RasterizerMarkRegionCached(u64 vaddr, u64 size, bool cached) {
-        if (vaddr == 0 || !AddressSpaceContains(*current_page_table, vaddr, size)) {
+        const auto canonical_address = Common::PageTable::CanonicalizeAddress(
+            vaddr, current_page_table->GetAddressSpaceBits());
+        if (vaddr == 0 || !canonical_address ||
+            !AddressSpaceContains(*current_page_table, *canonical_address, size)) {
             return;
         }
+        vaddr = *canonical_address;
 
         if (current_page_table->fastmem_arena) {
             Common::MemoryPermission perm{};
@@ -595,9 +621,10 @@ struct Memory::Impl {
 
     template<typename F, typename G>
     [[nodiscard]] u8* GetPointerImpl(u64 vaddr, F&& on_unmapped, G&& on_rasterizer) const {
-        // AARCH64 masks the upper 16 bit of all memory accesses
-        vaddr &= 0xffffffffffffULL;
-        if (AddressSpaceContains(*current_page_table, vaddr, 1)) [[likely]] {
+        const auto canonical_address = Common::PageTable::CanonicalizeAddress(
+            vaddr, current_page_table->GetAddressSpaceBits());
+        if (canonical_address && AddressSpaceContains(*current_page_table, *canonical_address, 1)) [[likely]] {
+            vaddr = *canonical_address;
             // Avoid adding any extra logic to this fast-path block
             const auto raw = current_page_table->entries[vaddr >> YUZU_PAGEBITS].Raw();
             if (auto pointer = Common::PageTable::PageEntryData::ExtractPointer(raw); pointer) [[likely]] {
@@ -650,8 +677,8 @@ struct Memory::Impl {
     template <typename T>
     inline T Read(Common::ProcessAddress vaddr) noexcept requires(std::is_trivially_copyable_v<T>) {
         const u64 addr = GetInteger(vaddr);
-        if (auto const ptr = GetPointerImpl(addr, [addr]() {
-            LOG_ERROR(HW_Memory, "Unmapped Read{} @ {:#016x}", sizeof(T) * 8, addr);
+        if (auto const ptr = GetPointerImpl(addr, [this, addr]() {
+            LogUnmappedRead(addr, sizeof(T));
         }, [&]() {
             HandleRasterizerDownload(addr, sizeof(T));
         }); ptr) [[likely]] {
@@ -789,6 +816,7 @@ struct Memory::Impl {
     }
 
     Core::System& system;
+    std::array<std::atomic<u64>, 17> unmapped_read_counts{};
     Tegra::MaxwellDeviceMemoryManager* gpu_device_memory{};
     Common::PageTable* current_page_table = nullptr;
 
@@ -838,7 +866,12 @@ void Memory::ProtectRegion(Common::PageTable& page_table, Common::ProcessAddress
 
 bool Memory::IsValidVirtualAddress(const Common::ProcessAddress vaddr) const {
     const auto& page_table = *impl->current_page_table;
-    const size_t page = vaddr >> YUZU_PAGEBITS;
+    const auto canonical_address = Common::PageTable::CanonicalizeAddress(
+        GetInteger(vaddr), page_table.GetAddressSpaceBits());
+    if (!canonical_address) {
+        return false;
+    }
+    const size_t page = *canonical_address >> YUZU_PAGEBITS;
     if (page >= page_table.entries.size()) {
         return false;
     }
@@ -848,8 +881,16 @@ bool Memory::IsValidVirtualAddress(const Common::ProcessAddress vaddr) const {
 }
 
 bool Memory::IsValidVirtualAddressRange(Common::ProcessAddress base, u64 size) const {
-    Common::ProcessAddress end = base + size;
-    Common::ProcessAddress page = Common::AlignDown(GetInteger(base), YUZU_PAGESIZE);
+    const auto& page_table = *impl->current_page_table;
+    const auto canonical_base = Common::PageTable::CanonicalizeAddress(
+        GetInteger(base), page_table.GetAddressSpaceBits());
+    if (!canonical_base ||
+        !Common::PageTable::ContainsAddressRange(*canonical_base, size,
+                                                 page_table.GetAddressSpaceBits())) {
+        return false;
+    }
+    const Common::ProcessAddress end = *canonical_base + size;
+    Common::ProcessAddress page = Common::AlignDown(*canonical_base, YUZU_PAGESIZE);
 
     for (; page < end; page += YUZU_PAGESIZE) {
         if (!IsValidVirtualAddress(page)) {

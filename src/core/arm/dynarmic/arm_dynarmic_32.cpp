@@ -23,7 +23,9 @@ DynarmicCallbacks32::DynarmicCallbacks32(ArmDynarmic32& parent, Kernel::KProcess
 {}
 
 u64 DynarmicCallbacks32::MemoryRead(u32 vaddr, size_t size) {
-    CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read);
+    if (!CheckMemoryAccess(vaddr, size, Kernel::DebugWatchpointType::Read)) {
+        return 0;
+    }
     switch (size) {
     case sizeof(u64): return m_memory.Read64(vaddr);
     case sizeof(u32): return m_memory.Read32(vaddr);
@@ -122,7 +124,7 @@ bool DynarmicCallbacks32::CheckMemoryAccess(u64 addr, u64 size, Kernel::DebugWat
     if (!m_memory.IsValidVirtualAddressRange(addr, size)) {
         LOG_CRITICAL(Core_ARM, "Stopping execution due to unmapped memory access at {:#x}",
                         addr);
-        m_parent.m_jit->HaltExecution(PrefetchAbort);
+        m_parent.m_jit->HaltExecution(DataAbort);
         return false;
     }
 
@@ -324,11 +326,13 @@ bool ArmDynarmic32::IsInThumbMode() const {
 
 HaltReason ArmDynarmic32::RunThread(Kernel::KThread* thread) {
     m_jit->ClearExclusiveState();
+    m_halted_watchpoint = nullptr;
     return TranslateHaltReason(m_jit->Run());
 }
 
 HaltReason ArmDynarmic32::StepThread(Kernel::KThread* thread) {
     m_jit->ClearExclusiveState();
+    m_halted_watchpoint = nullptr;
     return TranslateHaltReason(m_jit->Step());
 }
 
